@@ -1,0 +1,9 @@
+backup_baseline_70pct/
+node_modules/
+.pytest_cache/
+__pycache__/
+*.pyc
+results/
+.DS_Store
+*.zip
+*.tar.gz

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Smart Warehouse | AMR Fleet Operations</title>
+  <title>Smart Warehouse | Industrial AMR Fleet Operations</title>
   <style>
     :root {
       --bg: #071015;
@@ -25,17 +25,17 @@
       font: 13px/1.4 Inter, ui-sans-serif, system-ui, sans-serif;
     }
     .shell {
-      max-width: 1600px;
+      max-width: 1620px;
       min-height: 100vh;
       margin: auto;
-      padding: 22px 28px 28px;
+      padding: 20px 24px 32px;
     }
     header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       border-bottom: 1px solid var(--line);
-      padding-bottom: 18px;
+      padding-bottom: 16px;
     }
     .eyebrow {
       color: var(--cyan);
@@ -44,8 +44,8 @@
       font-weight: 700;
     }
     h1 {
-      margin: 5px 0 0;
-      font-size: clamp(21px, 3vw, 34px);
+      margin: 4px 0 0;
+      font-size: clamp(20px, 2.5vw, 30px);
       letter-spacing: .04em;
     }
     .status {
@@ -67,9 +67,9 @@
     .judge-banner {
       background: linear-gradient(90deg, rgba(240, 179, 91, 0.22), rgba(86, 214, 207, 0.25));
       border: 1px solid var(--amber);
-      padding: 12px 18px;
+      padding: 11px 16px;
       border-radius: 6px;
-      margin: 16px 0 6px;
+      margin: 14px 0 6px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -85,8 +85,8 @@
       background: var(--amber);
       color: #071015;
       font-weight: 900;
-      font-size: 11px;
-      padding: 4px 9px;
+      font-size: 10px;
+      padding: 3px 8px;
       border-radius: 3px;
       letter-spacing: 0.1em;
       white-space: nowrap;
@@ -102,9 +102,9 @@
 
     .toolbar {
       display: flex;
-      gap: 8px;
+      gap: 7px;
       flex-wrap: wrap;
-      margin: 16px 0;
+      margin: 14px 0;
       align-items: end;
     }
     .input {
@@ -120,17 +120,18 @@
       background: #10232a;
       color: var(--text);
       border: 1px solid #31505a;
-      padding: 9px;
+      padding: 8px 9px;
       border-radius: 4px;
     }
     button {
       background: #142a31;
       border: 1px solid #31505a;
       color: var(--text);
-      padding: 9px 13px;
+      padding: 8px 12px;
       border-radius: 4px;
       cursor: pointer;
       font-weight: 700;
+      font-size: 12px;
       transition: all 0.15s ease;
     }
     button:hover {
@@ -146,7 +147,7 @@
       background: linear-gradient(135deg, #f0b35b, #e08b2d);
       color: #071015;
       border: 1px solid #ffe1a6;
-      box-shadow: 0 0 14px rgba(240,179,91,0.4);
+      box-shadow: 0 0 12px rgba(240,179,91,0.35);
     }
     button.accent-btn:hover {
       filter: brightness(1.15);
@@ -161,23 +162,32 @@
       background: var(--cyan);
       color: #071015;
     }
+    button.recovery-btn {
+      background: #2b1f3d;
+      border-color: #b388ff;
+      color: #d1c4e9;
+    }
+    button.recovery-btn:hover {
+      background: #b388ff;
+      color: #071015;
+    }
 
     /* Edge Hardware Telemetry Ribbon */
     .telemetry-bar {
       display: flex;
       flex-wrap: wrap;
-      gap: 20px;
+      gap: 16px;
       align-items: center;
       background: rgba(13, 27, 34, 0.96);
       border: 1px solid var(--line);
-      padding: 9px 18px;
+      padding: 9px 16px;
       margin-bottom: 12px;
       border-radius: 5px;
     }
     .telemetry-item {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 6px;
     }
     .telemetry-item span {
       color: var(--muted);
@@ -202,27 +212,74 @@
       border: 1px solid var(--line);
     }
     .stat {
-      padding: 13px 15px;
+      padding: 12px 14px;
     }
     .stat span {
       display: block;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 10px;
       text-transform: uppercase;
-      letter-spacing: .1em;
+      letter-spacing: .09em;
     }
     .stat strong {
       display: block;
-      margin-top: 4px;
-      font-size: 23px;
+      margin-top: 3px;
+      font-size: 22px;
     }
+
+    /* Scenarios Lab Panel */
+    .scenario-lab {
+      background: rgba(13, 27, 34, .95);
+      border: 1px solid #20404a;
+      padding: 12px 16px;
+      margin-bottom: 12px;
+      border-radius: 5px;
+    }
+    .scenario-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+    }
+    .scenario-btn {
+      background: #10252d;
+      border: 1px solid #264b54;
+      color: #cde4e2;
+      padding: 8px 10px;
+      text-align: left;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      display: grid;
+      gap: 3px;
+    }
+    .scenario-btn:hover {
+      border-color: var(--cyan);
+      background: #14333d;
+      color: var(--text);
+    }
+    .scenario-btn span {
+      font-weight: 800;
+      color: var(--text);
+    }
+    .scenario-btn small {
+      color: var(--muted);
+      font-size: 9px;
+      letter-spacing: 0.04em;
+    }
+
     .workspace {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
+      grid-template-columns: minmax(0, 1fr) 350px;
       gap: 12px;
     }
     .panel {
-      padding: 15px;
+      padding: 14px;
     }
     .panel-title {
       display: flex;
@@ -233,7 +290,7 @@
       letter-spacing: .12em;
       font-size: 11px;
       font-weight: 700;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
     }
     #map {
       position: relative;
@@ -308,20 +365,11 @@
       box-shadow: 0 0 12px rgba(86,214,207,.6);
       transition: all 0.1s ease;
     }
-    .robot.waiting, .robot.negotiating {
-      background: var(--amber);
-    }
-    .robot.rerouting {
-      background: var(--red);
-    }
-    .robot.charging, .robot.docked_charging {
-      background: var(--green);
-      box-shadow: 0 0 14px var(--green);
-    }
-    .robot.returning_to_charge {
-      background: var(--dock);
-      color: #071015;
-    }
+    .robot.waiting, .robot.negotiating { background: var(--amber); }
+    .robot.rerouting { background: var(--red); }
+    .robot.charging, .robot.docked_charging { background: var(--green); box-shadow: 0 0 14px var(--green); }
+    .robot.returning_to_charge { background: var(--dock); color: #071015; }
+    .robot.failed { background: #3d0e0e; border: 2px solid var(--red); color: var(--red); box-shadow: 0 0 12px var(--red); }
     .path {
       position: absolute;
       inset: 25%;
@@ -353,10 +401,11 @@
     }
     .robot-card {
       border: 1px solid #244049;
-      padding: 11px;
+      padding: 10px;
       background: #10232a;
       border-radius: 4px;
     }
+    .robot-card.failed { border-color: var(--red); background: rgba(239, 109, 109, 0.1); }
     .robot-head {
       display: flex;
       justify-content: space-between;
@@ -371,6 +420,7 @@
     .robot-card.rerouting .state { color: var(--red); }
     .robot-card.charging .state, .robot-card.docked_charging .state { color: var(--green); }
     .robot-card.returning_to_charge .state { color: var(--dock); }
+    .robot-card.failed .state { color: var(--red); font-weight: 900; }
     button.active-toggle {
       background: #184638;
       border-color: var(--green);
@@ -381,13 +431,13 @@
       justify-content: space-between;
       gap: 8px;
       color: var(--muted);
-      margin-top: 6px;
+      margin-top: 5px;
       font-size: 11px;
     }
     .bar {
       height: 4px;
       background: #203940;
-      margin-top: 8px;
+      margin-top: 7px;
       border-radius: 2px;
       overflow: hidden;
     }
@@ -396,6 +446,47 @@
       height: 100%;
       background: var(--green);
     }
+
+    /* Industrial Lower Panels: Decisions & Events */
+    .lower-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .decision-log-list {
+      height: 190px;
+      overflow: auto;
+      display: grid;
+      gap: 6px;
+      font-size: 11px;
+    }
+    .decision-card {
+      background: #10252b;
+      border-left: 3px solid var(--cyan);
+      padding: 7px 10px;
+      border-radius: 0 4px 4px 0;
+    }
+    .decision-card.task_reassignment { border-color: var(--amber); }
+    .decision-card.emergency_preemption { border-color: var(--red); }
+    .decision-card.deadlock_break { border-color: #b388ff; }
+    .decision-head {
+      display: flex;
+      justify-content: space-between;
+      color: var(--cyan);
+      font-weight: 700;
+      font-size: 10px;
+      margin-bottom: 2px;
+    }
+    .decision-card.task_reassignment .decision-head { color: var(--amber); }
+    .decision-card.emergency_preemption .decision-head { color: var(--red); }
+    .decision-card.deadlock_break .decision-head { color: #b388ff; }
+    .decision-reason {
+      color: var(--muted);
+      font-size: 10.5px;
+      margin-top: 2px;
+    }
+
     .bottom {
       display: grid;
       grid-template-columns: 1.2fr .8fr;
@@ -403,11 +494,11 @@
       margin-top: 12px;
     }
     #events {
-      height: 180px;
+      height: 160px;
       overflow: auto;
       display: grid;
       align-content: start;
-      gap: 5px;
+      gap: 4px;
       font-family: ui-monospace, monospace;
       font-size: 11px;
     }
@@ -422,23 +513,22 @@
       margin-right: 8px;
     }
     #tasks {
-      height: 180px;
+      height: 160px;
       overflow: auto;
       display: grid;
-      gap: 6px;
+      gap: 5px;
     }
     .task {
       display: flex;
       justify-content: space-between;
       border-bottom: 1px solid #1b343b;
-      padding-bottom: 5px;
+      padding-bottom: 4px;
       color: var(--muted);
+      font-size: 11px;
     }
-    .task strong {
-      color: var(--text);
-    }
+    .task strong { color: var(--text); }
 
-    /* Interactive Benchmark Modal */
+    /* Interactive Modals */
     .modal-overlay {
       position: fixed;
       inset: 0;
@@ -449,9 +539,7 @@
       justify-content: center;
       z-index: 1000;
     }
-    .modal-overlay.active {
-      display: flex;
-    }
+    .modal-overlay.active { display: flex; }
     .modal-card {
       background: #0d1b22;
       border: 1px solid var(--cyan);
@@ -467,12 +555,7 @@
       align-items: center;
       margin-bottom: 16px;
     }
-    .modal-head h2 {
-      margin: 0;
-      font-size: 18px;
-      color: var(--cyan);
-      letter-spacing: .04em;
-    }
+    .modal-head h2 { margin: 0; font-size: 18px; color: var(--cyan); letter-spacing: .04em; }
     .modal-close {
       background: transparent;
       border: none;
@@ -481,9 +564,7 @@
       cursor: pointer;
       padding: 0 4px;
     }
-    .modal-close:hover {
-      color: var(--text);
-    }
+    .modal-close:hover { color: var(--text); }
     .benchmark-table {
       width: 100%;
       border-collapse: collapse;
@@ -491,7 +572,7 @@
       font-size: 12px;
     }
     .benchmark-table th, .benchmark-table td {
-      padding: 10px 14px;
+      padding: 9px 12px;
       border: 1px solid #203740;
       text-align: left;
     }
@@ -502,9 +583,7 @@
       letter-spacing: .08em;
       text-transform: uppercase;
     }
-    .benchmark-table tr:nth-child(even) {
-      background: rgba(16, 35, 42, 0.6);
-    }
+    .benchmark-table tr:nth-child(even) { background: rgba(16, 35, 42, 0.6); }
     .proof-box {
       background: #10232a;
       border-left: 3px solid var(--green);
@@ -514,14 +593,13 @@
       line-height: 1.5;
     }
 
-    @media (max-width: 1000px) {
-      .workspace, .bottom { grid-template-columns: 1fr; }
+    @media (max-width: 1100px) {
+      .scenario-grid { grid-template-columns: repeat(3, 1fr); }
+      .workspace, .lower-grid, .bottom { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(4, 1fr); }
-      #map { min-height: 360px; }
     }
-    @media (max-width: 560px) {
-      .shell { padding: 16px; }
-      header { align-items: flex-start; gap: 12px; flex-direction: column; }
+    @media (max-width: 640px) {
+      .scenario-grid { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, 1fr); }
     }
   </style>
@@ -530,8 +608,8 @@
   <main class="shell">
     <header>
       <div>
-        <div class="eyebrow">SMART WAREHOUSE / EDGE COORDINATION</div>
-        <h1>AMR FLEET OPERATIONS</h1>
+        <div class="eyebrow">INDUSTRIAL AMR FLEET OPERATIONS — PROBLEM-SOLVING LAYER</div>
+        <h1>SMART WAREHOUSE AUTONOMOUS FLEET</h1>
       </div>
       <div class="status">
         <i class="dot"></i>
@@ -545,7 +623,7 @@
         <span class="badge">⭐ JUDGE TOUR ACTIVE</span>
         <strong id="judgeBannerText" style="color:var(--text); font-size:13px;">STAGE 1/5: Autonomous Fleet Tasking Initialized</strong>
       </div>
-      <button id="stopJudgeDemoBtn" style="padding:5px 10px; font-size:11px;">EXIT TOUR</button>
+      <button id="stopJudgeDemoBtn" style="padding:4px 9px; font-size:11px;">EXIT TOUR</button>
     </div>
 
     <!-- Edge Hardware & WFG Status Ribbon -->
@@ -563,17 +641,28 @@
         <strong id="pingMs">8.2 ms</strong>
       </div>
       <div class="telemetry-item">
-        <span>WAIT-FOR GRAPH (WFG):</span>
+        <span>CONGESTION:</span>
+        <strong id="congestionHud" style="color:var(--green)">LOW (0.0%)</strong>
+      </div>
+      <div class="telemetry-item">
+        <span>SLA COMPLIANCE:</span>
+        <strong id="slaCompliance" style="color:var(--green)">100%</strong>
+      </div>
+      <div class="telemetry-item">
+        <span>WFG STATUS:</span>
         <strong id="wfgStatus" style="color:var(--green)">0 CYCLES (OPTIMAL FLOW)</strong>
       </div>
       <div class="telemetry-item" style="margin-left:auto;">
-        <span class="badge-sm">DEDICAT6G OPERATIONAL BASELINE</span>
+        <span class="badge-sm" id="telemetryLabel">Simulated Edge Telemetry — DEDICAT6G Reference</span>
       </div>
     </div>
 
+    <!-- Toolbar Controls -->
     <div class="toolbar">
       <button id="startJudgeDemoBtn" class="accent-btn" data-action="start_judge_demo">⭐ START JUDGE DEMO</button>
       <button id="openBenchmarkBtn" class="benchmark-btn" data-action="run_benchmark">📊 RUN BENCHMARK</button>
+      <button id="recoverFleetBtn" class="recovery-btn" data-action="recover_fleet">🔧 RECOVER FLEET</button>
+      <button id="exportExcelBtn" class="accent-btn" onclick="window.open('/api/export/excel', '_blank')">📥 EXPORT OPERATIONAL DATA (.XLSX)</button>
       <label class="input">AMRs<input id="robotCount" type="number" min="1" max="50" value="5"></label>
       <button data-action="create_fleet">CREATE FLEET</button>
       <label class="input">Tasks<input id="taskCount" type="number" min="1" max="100" value="10"></label>
@@ -613,6 +702,57 @@
       <button id="paths">HIDE PATHS</button>
     </div>
 
+    <!-- "What If?" Industrial Disruption Lab -->
+    <section class="scenario-lab">
+      <div class="scenario-header">
+        <span class="eyebrow">"WHAT IF?" EVALUATOR EXPERIMENT LAB — REAL DISRUPTION INJECTION</span>
+        <span id="activeScenarioTag" style="font-size:11px; color:var(--cyan)">System Ready: Click an incident to inject</span>
+      </div>
+      <div class="scenario-grid">
+        <button class="scenario-btn" data-scenario="aisle_blockage">
+          <span>⚡ Aisle Blockage</span>
+          <small>Dynamic corridor obstruction & local reroute</small>
+        </button>
+        <button class="scenario-btn" data-scenario="amr_failure">
+          <span>⚠️ AMR Hardware Failure</span>
+          <small>Drive fault, cargo drop & rescue dispatch</small>
+        </button>
+        <button class="scenario-btn" data-scenario="charger_failure">
+          <span>🔌 Charger Outage</span>
+          <small>Dock (1,1) disabled; route to (1,16)</small>
+        </button>
+        <button class="scenario-btn" data-scenario="emergency_task">
+          <span>🚨 Emergency Order</span>
+          <small>Priority-5 arrival with 25-tick SLA</small>
+        </button>
+        <button class="scenario-btn" data-scenario="head_on_conflict">
+          <span>⚔️ Head-On Contention</span>
+          <small>P2P priority bidding & side-buffer yield</small>
+        </button>
+        <button class="scenario-btn" data-scenario="deadlock_cycle">
+          <span>🔄 Deadlock Cycle</span>
+          <small>WFG circular wait DFS detect & break</small>
+        </button>
+        <button class="scenario-btn" data-scenario="cascading_failure">
+          <span>💥 Cascading Multi-Failure</span>
+          <small>AMR fault + obstacle + charger outage</small>
+        </button>
+        <button class="scenario-btn" data-scenario="traffic_surge">
+          <span>🚦 Traffic Surge</span>
+          <small>Fleet scaling to 15 AMRs with bottleneck HUD</small>
+        </button>
+        <button class="scenario-btn" data-scenario="communication_degradation">
+          <span>📶 Mesh Degradation</span>
+          <small>200ms latency + 30% loss velocity throttling</small>
+        </button>
+        <button class="scenario-btn" data-scenario="restricted_zone">
+          <span>⛔ Restricted Zone</span>
+          <small>3x3 maintenance zone evacuation & perimeter path</small>
+        </button>
+      </div>
+    </section>
+
+    <!-- Operational KPIs -->
     <section class="stats">
       <div class="stat"><span>Active robots</span><strong id="activeRobots">0</strong></div>
       <div class="stat"><span>Total tasks</span><strong id="totalTasks">0</strong></div>
@@ -621,13 +761,14 @@
       <div class="stat"><span>Completed</span><strong id="completedTasks">0</strong></div>
       <div class="stat"><span>P2P messages</span><strong id="messages">0</strong></div>
       <div class="stat"><span>Prevented conflicts</span><strong id="conflicts">0</strong></div>
-      <div class="stat"><span>Actual collisions</span><strong id="collisions">0</strong></div>
+      <div class="stat"><span>Actual collisions</span><strong id="collisions" style="color:var(--green)">0</strong></div>
     </section>
 
+    <!-- Workspace & Fleet Status -->
     <section class="workspace">
       <div class="panel">
         <div class="panel-title">
-          <span>Warehouse map / backend state</span>
+          <span>Warehouse Map / Active Decentralized State</span>
           <span id="tick">T+000</span>
         </div>
         <div id="map"></div>
@@ -637,28 +778,52 @@
           <span><i style="border-color:#56d6cf"></i>drop-off</span>
           <span><i style="border-color:#7be28b"></i>charging dock ⚡</span>
           <span><i style="background:#ef6d6d"></i>dynamic obstacle</span>
+          <span><i style="background:#3d0e0e; border-color:#ef6d6d"></i>failed AMR</span>
         </div>
       </div>
       <aside class="panel">
         <div class="panel-title">
-          <span>Fleet status</span>
+          <span>Fleet Hardware & Battery</span>
           <span id="mode">LIVE</span>
         </div>
         <div id="fleet" class="fleet-list"></div>
       </aside>
     </section>
 
+    <!-- Lower Operational Grid: Decisions & Incident Center -->
+    <section class="lower-grid">
+      <div class="panel">
+        <div class="panel-title">
+          <span>Operational Decision Records (Audit Trail)</span>
+          <span id="decisionCount" style="color:var(--cyan)">0 records</span>
+        </div>
+        <div id="decisionsList" class="decision-log-list">
+          <span style="color:var(--muted)">Awaiting operational decision events...</span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">
+          <span>Fleet Incident & Recovery Center</span>
+          <span id="recoveryStatus" style="color:var(--green)">HEALTHY</span>
+        </div>
+        <div id="recoveryReport" style="font-size:11px; color:var(--muted); line-height:1.5;">
+          No active incidents. Fleet operating autonomously in nominal state.
+        </div>
+      </div>
+    </section>
+
+    <!-- Bottom Panels: Event Stream & Task Execution -->
     <section class="bottom">
       <div class="panel">
         <div class="panel-title">Real-time event stream</div>
         <div id="events"></div>
       </div>
       <div class="panel">
-        <div class="panel-title">Task execution</div>
+        <div class="panel-title">Task execution & SLA tracking</div>
         <div id="tasks"></div>
-        <div class="panel-title" style="margin-top:14px">P2P activity</div>
+        <div class="panel-title" style="margin-top:14px">P2P mesh activity</div>
         <div id="p2p"></div>
-        <div class="panel-title" style="margin-top:14px">Manual control</div>
+        <div class="panel-title" style="margin-top:14px">Manual override control</div>
         <select id="manualRobot"></select>
         <button data-manual="forward">↑</button>
         <button data-manual="left">←</button>
@@ -749,10 +914,13 @@
       if (event.type === 'continuous_dispatch_toggled') return `Continuous dispatch ${event.enabled ? 'ENABLED' : 'DISABLED'}`;
       if (event.type === 'p2p_negotiation') return `${event.robot} won priority bid over ${event.peer} (carried pkg priority)`;
       if (event.type === 'deadlock_cycle_detected') return `WFG Cycle detected: ${event.cycle.join(' → ')}`;
-      if (event.type === 'deadlock_cycle_resolved') return `Deadlock resolved: ${event.robot} rerouting`;
+      if (event.type === 'deadlock_cycle_resolved' || event.type === 'deadlock_cycle_broken') return `Deadlock resolved: ${event.broken_by || event.robot} rerouted`;
       if (event.type === 'judge_demo_started') return '⭐ Judge demonstration tour started';
       if (event.type === 'judge_demo_stopped') return 'Judge demonstration tour ended';
       if (event.type === 'benchmark_completed') return 'Multi-seed benchmark completed (+23.6% throughput gain)';
+      if (event.type === 'scenario_executed') return `Disruption executed: ${event.scenario_id}`;
+      if (event.type === 'fleet_recovery_completed') return `Fleet recovery executed (${event.problems} problems, ${event.actions} actions)`;
+      if (event.type === 'sla_violation') return `SLA violation on ${event.task} (delay: ${event.delay} ticks)`;
       return event.type || 'event';
     };
 
@@ -778,7 +946,7 @@
       $('mode').textContent = data.running ? 'LIVE' : 'PAUSED';
       $('tick').textContent = `T+${String(data.timestamp).padStart(3, '0')}`;
 
-      // Continuous dispatch button indicator
+      // Continuous dispatch button
       if ($('continuousBtn')) {
         $('continuousBtn').textContent = data.continuous_dispatch ? 'AUTO-DISPATCH: ON' : 'AUTO-DISPATCH: OFF';
         $('continuousBtn').className = data.continuous_dispatch ? 'active-toggle' : '';
@@ -803,6 +971,19 @@
         $('pingMs').textContent = `${data.edge_hardware.ping_ms} ms`;
       }
 
+      // Congestion HUD
+      if (data.congestion) {
+        const c = data.congestion;
+        $('congestionHud').textContent = `${c.level} (${c.score.toFixed(1)}%)`;
+        $('congestionHud').style.color = c.level === 'LOW' ? 'var(--green)' : c.level === 'MEDIUM' ? 'var(--amber)' : 'var(--red)';
+      }
+
+      // SLA Compliance
+      if (data.sla) {
+        $('slaCompliance').textContent = `${data.sla.compliance_pct}% (${data.sla.violations} delay)`;
+        $('slaCompliance').style.color = data.sla.violations === 0 ? 'var(--green)' : 'var(--amber)';
+      }
+
       // WFG Status
       if (data.wfg_cycles && data.wfg_cycles.length > 0) {
         $('wfgStatus').textContent = `${data.wfg_cycles.length} CYCLES DETECTED (RESOLVING)`;
@@ -810,6 +991,41 @@
       } else {
         $('wfgStatus').textContent = '0 CYCLES (OPTIMAL FLOW)';
         $('wfgStatus').style.color = 'var(--green)';
+      }
+
+      // Active Scenario Tag
+      if (data.active_scenario) {
+        const scenarioLabel = data.active_scenario.name || data.active_scenario.id;
+        $('activeScenarioTag').textContent = `Active Disruption: ${scenarioLabel} (executed successfully)`;
+        $('activeScenarioTag').style.color = 'var(--amber)';
+      }
+
+      // Operational Decisions Log
+      if (data.decisions && data.decisions.length > 0) {
+        $('decisionCount').textContent = `${data.decisions.length} recorded`;
+        $('decisionsList').innerHTML = data.decisions.slice().reverse().map(d => `
+          <div class="decision-card ${d.category.toLowerCase()}">
+            <div class="decision-head">
+              <span>${d.decision_id} · T+${d.timestamp} [${d.category}]</span>
+              <span>${d.result}</span>
+            </div>
+            <div style="font-weight:700; color:var(--text);">${d.decision}</div>
+            <div class="decision-reason"><strong>Problem:</strong> ${d.problem}</div>
+            <div class="decision-reason"><strong>Reason:</strong> ${d.reason}</div>
+          </div>
+        `).join('');
+      }
+
+      // Recovery History
+      if (data.recovery_history && data.recovery_history.length > 0) {
+        const latest = data.recovery_history[data.recovery_history.length - 1];
+        $('recoveryStatus').textContent = `RECOVERED (${latest.plan_id})`;
+        $('recoveryStatus').style.color = 'var(--green)';
+        $('recoveryReport').innerHTML = `
+          <strong>Latest Recovery:</strong> ${latest.results}<br>
+          <small><strong>Problems Identified:</strong> ${latest.problems_found.join('; ')}</small><br>
+          <small><strong>Actions Taken:</strong> ${latest.actions_executed.join('; ') || 'Autonomous peer re-synchronization'}</small>
+        `;
       }
 
       // Benchmark summary if available
@@ -826,7 +1042,7 @@
       const chargingStations = new Set((data.warehouse.charging_stations || []).map(c => c.join(',')));
 
       const counts = data.task_counts || {};
-      $('activeRobots').textContent = robots.filter(r => r.state !== 'IDLE').length;
+      $('activeRobots').textContent = robots.filter(r => r.state !== 'IDLE' && !r.failed).length;
       $('totalTasks').textContent = counts.total || 0;
       $('queuedTasks').textContent = counts.queued || 0;
       $('progressTasks').textContent = counts.in_progress || 0;
@@ -835,7 +1051,7 @@
       $('conflicts').textContent = data.metrics.prevented_conflicts || 0;
       $('collisions').textContent = data.metrics.collisions || 0;
 
-      // Warehouse Map
+      // Map rendering
       const map = $('map');
       map.innerHTML = '';
       for (let y = 0; y < data.warehouse.height; y++) {
@@ -853,7 +1069,7 @@
           if (task) cell.classList.add('pickup');
           if (drop) cell.classList.add('drop');
 
-          if (showPaths && robots.some(r => (r.path || []).some(p => p[0] === x && p[1] === y))) {
+          if (showPaths && robots.some(r => !r.failed && (r.path || []).some(p => p[0] === x && p[1] === y))) {
             const path = document.createElement('span');
             path.className = 'path';
             cell.append(path);
@@ -870,8 +1086,8 @@
           const robot = robots.find(r => r.position[0] === x && r.position[1] === y);
           if (robot) {
             const marker = document.createElement('span');
-            marker.className = `robot ${robot.state.toLowerCase()}`;
-            marker.textContent = robot.robot_id;
+            marker.className = `robot ${robot.state.toLowerCase()}${robot.failed ? ' failed' : ''}`;
+            marker.textContent = robot.failed ? '✕' : robot.robot_id;
             if (robot.carrying_package_id) {
               const packageMarker = document.createElement('span');
               packageMarker.className = 'package';
@@ -884,12 +1100,12 @@
         }
       }
 
-      // Fleet list cards with hardware telemetry & negotiation info
+      // Fleet list
       $('fleet').innerHTML = robots.map(r => `
-        <div class="robot-card ${r.state.toLowerCase()}">
+        <div class="robot-card ${r.state.toLowerCase()}${r.failed ? ' failed' : ''}">
           <div class="robot-head">
             <span>${r.robot_id}</span>
-            <span class="state">${r.state}</span>
+            <span class="state">${r.failed ? 'FAILED' : r.state}</span>
           </div>
           <div class="robot-meta">
             <span>Task: ${r.current_task || (r.assigned_dock ? 'DOCK' : 'QUEUED')}</span>
@@ -899,6 +1115,7 @@
             <span>Battery: ${r.battery}%</span>
             <span>CPU: ${r.cpu_usage || 24}% · RAM: ${r.ram_usage || 8.2}G</span>
           </div>
+          ${r.failed ? `<div class="robot-meta" style="color:var(--red); font-size:10px;"><span>Fault:</span><span>${r.failure_reason || 'actuator fault'}</span></div>` : ''}
           ${r.negotiating_with ? `<div class="robot-meta" style="color:var(--amber); font-size:10px;"><span>P2P Bidding with:</span><span>${r.negotiating_with}</span></div>` : ''}
           <div class="bar"><b style="width:${r.battery}%"></b></div>
         </div>
@@ -908,22 +1125,25 @@
       $('tasks').innerHTML = tasks.map(t => `
         <div class="task">
           <span>
-            <strong>${t.task_id}</strong> / ${t.package_id || 'no package'}<br>
+            <strong>${t.task_id}</strong> / ${t.package_id || 'no package'} (Pri ${t.priority})<br>
             ${t.pickup.join(',')} → ${t.destination.join(',')}<br>
-            <small>${t.assigned_robot || 'QUEUED'}${t.allocation_reason ? ` · ${t.allocation_reason}` : ''}</small>
+            <small>${t.assigned_robot || 'QUEUED'}${t.allocation_reason ? ` · ${t.allocation_reason}` : ''}${t.reassignment_count > 0 ? ` · Reassigned ${t.reassignment_count}x` : ''}</small>
           </span>
-          <span>${t.status}</span>
+          <span style="text-align:right;">
+            <span>${t.status}</span><br>
+            ${t.deadline ? `<small style="color:${t.sla_violated ? 'var(--red)' : 'var(--green)'}">SLA: ${t.sla_violated ? 'VIOLATED' : 'OK'}</small>` : ''}
+          </span>
         </div>
       `).join('');
 
-      $('manualRobot').innerHTML = robots.map(r => `<option value="${r.robot_id}">${r.robot_id}</option>`).join('');
+      $('manualRobot').innerHTML = robots.filter(r => !r.failed).map(r => `<option value="${r.robot_id}">${r.robot_id}</option>`).join('');
 
-      // Real-time events
+      // Events
       const events = (data.events || []).slice(-30);
       $('events').innerHTML = events.map(e => `<div class="event"><em>T+${e.time ?? data.timestamp}</em>${eventText(e)}</div>`).join('');
       $('events').scrollTop = $('events').scrollHeight;
 
-      // P2P activity events
+      // P2P activity
       const peerEvents = events.filter(e => e.type === 'peer_message' || e.type === 'p2p_negotiation').slice(-5);
       $('p2p').innerHTML = peerEvents.length ? peerEvents.map(e => `<div class="event"><em>T+${e.time ?? data.timestamp}</em>${eventText(e)}</div>`).join('') : '<span style="color:var(--muted)">No peer traffic yet</span>';
     }
@@ -938,7 +1158,7 @@
       };
     }
 
-    // Event listeners
+    // Action buttons
     document.querySelectorAll('[data-action]').forEach(button => {
       button.addEventListener('click', () => {
         const action = button.dataset.action;
@@ -946,6 +1166,14 @@
           : action === 'create_tasks' ? {count: Number($('taskCount').value)}
           : {};
         send(action, extra);
+      });
+    });
+
+    // Scenario lab buttons
+    document.querySelectorAll('[data-scenario]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const scId = btn.dataset.scenario;
+        send('trigger_scenario', {scenario_id: scId});
       });
     });
 
@@ -963,7 +1191,6 @@
       $('paths').textContent = showPaths ? 'HIDE PATHS' : 'SHOW PATHS';
     });
 
-    // Stop Judge Demo button
     if ($('stopJudgeDemoBtn')) {
       $('stopJudgeDemoBtn').addEventListener('click', () => send('stop_judge_demo'));
     }

@@ -35,6 +35,12 @@ class AMRRobot:
     cpu_usage: float = 24.0
     ram_usage: float = 8.18
     negotiating_with: Optional[str] = None
+    failed: bool = False
+    failure_reason: str = ""
+    sla_delays: int = 0
+    stuck_ticks: int = 0
+    idle_ticks: int = 0
+    charging_ticks: int = 0
 
     def set_position(self, pos: tuple[int, int]) -> None:
         self.position = pos
@@ -75,4 +81,10 @@ class AMRRobot:
             "waiting_time": round(self.waiting_time, 2),
             "travelled_distance": round(self.travelled_distance, 2),
             "completed_tasks": self.completed_tasks,
+            "failed": self.failed,
+            "failure_reason": self.failure_reason,
+            "sla_delays": self.sla_delays,
+            "stuck_ticks": self.stuck_ticks,
+            "idle_ticks": self.idle_ticks,
+            "charging_ticks": self.charging_ticks,
         }

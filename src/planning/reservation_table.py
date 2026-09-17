@@ -43,6 +43,9 @@ class ReservationTable:
             if not data:
                 del self._edge[edge]
 
+    def clear_robot(self, robot_id: str) -> None:
+        self.release(robot_id)
+
     def is_free(self, cell: tuple[int, int], time_step: int, robot_id: str | None = None) -> bool:
         data = self._vertex.get(cell, {})
         if time_step in data:

@@ -123,6 +123,22 @@ class LiveDashboard:
                         }
                         self.simulator.metrics.record_event({"type": "benchmark_completed", "summary": self.simulator.latest_benchmark_summary, "time": self.simulator.time_step})
                 threading.Thread(target=_bg_benchmark, daemon=True).start()
+            elif action == "trigger_scenario":
+                sc_id = str(message.get("scenario_id", ""))
+                res = self.simulator.scenario_registry.execute(sc_id, self.simulator)
+                self.simulator.active_scenario = {"id": sc_id, "result": res}
+            elif action == "recover_fleet":
+                self.simulator.recovery_engine.diagnose_and_recover(self.simulator)
+            elif action == "simulate_failure":
+                robot_id = str(message.get("robot_id", ""))
+                robot = self.simulator.robots.get(robot_id)
+                if robot:
+                    robot.failed = True
+                    robot.state = "FAILED"
+                    robot.failure_reason = "Manual simulated actuator fault"
+                    self.simulator.metrics.record_event({"type": "amr_failed", "robot": robot.robot_id, "time": self.simulator.time_step})
+            elif action == "inject_emergency_task":
+                self.simulator.scenario_registry.execute("emergency_task", self.simulator)
 
     def tick(self) -> None:
         with self.lock:
@@ -193,6 +209,38 @@ def run_benchmark_route(seed_count: int = 10, robot_count: int = 5, task_count: 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/api/export/excel"):
+            from src.reporting.excel_export import export_simulation_to_excel
+            with LIVE.lock:
+                excel_bytes = export_simulation_to_excel(LIVE.simulator)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", "attachment; filename=AMR_Fleet_Operational_Data.xlsx")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(excel_bytes)
+            return
+        if self.path.startswith("/api/scenario/run"):
+            query = parse_qs(urlsplit(self.path).query)
+            scenario_id = query.get("id", ["aisle_blockage"])[0]
+            with LIVE.lock:
+                result = LIVE.simulator.scenario_registry.execute(scenario_id, LIVE.simulator)
+                LIVE.simulator.active_scenario = {"id": scenario_id, "result": result}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+        if self.path.startswith("/api/recovery/run"):
+            with LIVE.lock:
+                plan = LIVE.simulator.recovery_engine.diagnose_and_recover(LIVE.simulator)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(plan.to_dict()).encode("utf-8"))
+            return
         if self.path.startswith("/api/benchmark"):
             query = parse_qs(urlsplit(self.path).query)
             seed_count = int(query.get("seed_count", ["10"])[0])

@@ -6,11 +6,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.coordination.conflict_resolution import ConflictDetector, NegotiationProtocol, WaitForGraph
+from src.coordination.decisions import DecisionLogger
 from src.coordination.peer_network import PeerNetwork
+from src.coordination.recovery import FleetRecoveryEngine
 from src.metrics.collector import MetricsCollector
 from src.planning.astar import a_star
+from src.planning.congestion import CongestionTracker, CongestionReport
 from src.planning.reservation_table import ReservationTable
 from src.robots.amr import AMRRobot
+from src.simulation.scenarios import ScenarioRegistry
 from src.tasks.package import Package
 from src.tasks.task import Task
 from src.warehouse.warehouse import Warehouse
@@ -55,6 +59,21 @@ class BaseFleetSimulator:
         self.demo_stage: int = 0
         self.demo_timer: int = 0
         self.demo_banner: str = ""
+        self.decision_logger = DecisionLogger()
+        self.congestion_tracker = CongestionTracker()
+        self.congestion_report = CongestionReport(score=0.0, level="LOW", bottlenecks=[], active_corridor_loads={})
+        self.recovery_engine = FleetRecoveryEngine()
+        self.scenario_registry = ScenarioRegistry()
+        self.active_scenario: dict[str, Any] | None = None
+        self.network_degraded: bool = False
+        self.edge_hardware: dict[str, Any] = {
+            "avg_cpu_percent": 24.5,
+            "avg_ram_gb": 8.22,
+            "ping_ms": 8.2,
+            "bandwidth_mbps": 124.5,
+            "dataset_reference": "Simulated Edge Telemetry — DEDICAT6G Reference",
+            "status": "NOMINAL - EDGE TELEMETRY ACTIVE",
+        }
         self.latest_benchmark_summary: dict[str, Any] | None = {
             "seeds": 10,
             "baseline_makespan_mean": 44.8,
@@ -94,7 +113,9 @@ class BaseFleetSimulator:
         for i in range(self.config.task_count):
             pickup = next((cell for cell in pickup_candidates[i % len(pickup_candidates):] + pickup_candidates[:i % len(pickup_candidates)] if self.warehouse.is_walkable(cell)), (2, 2))
             destination = next((cell for cell in destination_candidates[i % len(destination_candidates):] + destination_candidates[:i % len(destination_candidates)] if self.warehouse.is_walkable(cell)), (self.warehouse.width - 4, self.warehouse.height - 4))
-            task = Task(task_id=f"T{i}", pickup=pickup, destination=destination, priority=1 + (i % 3), created_at=self.time_step)
+            dist = abs(pickup[0] - destination[0]) + abs(pickup[1] - destination[1])
+            deadline = self.time_step + max(25, dist * 3)
+            task = Task(task_id=f"T{i}", pickup=pickup, destination=destination, priority=1 + (i % 3), created_at=self.time_step, deadline=deadline)
             task.package_id = f"PKG-{i + 1:03d}"
             self.add_task(task)
             self.packages[task.package_id] = Package(task.package_id, pickup, destination, task.task_id)
@@ -122,7 +143,7 @@ class BaseFleetSimulator:
         candidates: list[tuple[float, str, str]] = []
         occupied = {robot.position for robot in self.robots.values()}
         for robot in self.robots.values():
-            if robot.current_task is not None or robot.battery < self.config.low_battery_threshold or robot.state in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} or robot.assigned_dock is not None:
+            if robot.failed or robot.state == "FAILED" or robot.current_task is not None or robot.battery < self.config.low_battery_threshold or robot.state in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} or robot.assigned_dock is not None:
                 continue
             if task.metadata.get("stalled_robot") == robot.robot_id:
                 continue
@@ -384,7 +405,9 @@ class BaseFleetSimulator:
             destination = next((cell for cell in destination_candidates[idx % len(destination_candidates):] + destination_candidates[:idx % len(destination_candidates)] if self.warehouse.is_walkable(cell)), (self.warehouse.width - 4, self.warehouse.height - 4))
             task_id = f"T{idx}"
             pkg_id = f"PKG-{idx + 1:03d}"
-            task = Task(task_id=task_id, pickup=pickup, destination=destination, priority=1 + (idx % 3), created_at=self.time_step, package_id=pkg_id)
+            dist = abs(pickup[0] - destination[0]) + abs(pickup[1] - destination[1])
+            deadline = self.time_step + max(25, dist * 3)
+            task = Task(task_id=task_id, pickup=pickup, destination=destination, priority=1 + (idx % 3), created_at=self.time_step, deadline=deadline, package_id=pkg_id)
             self.add_task(task)
             self.packages[pkg_id] = Package(pkg_id, pickup, destination, task_id)
         self.metrics.record_event({"type": "tasks_replenished", "count": count, "time": self.time_step})
@@ -417,11 +440,32 @@ class BaseFleetSimulator:
         self._assign_unassigned_tasks()
         self._broadcast_peer_intents()
 
+        # Check SLA deadlines on active tasks
+        for task in self.tasks.values():
+            if task.status != "completed" and task.deadline and self.time_step > task.deadline and not task.sla_violated:
+                task.sla_violated = True
+                task.sla_delay = self.time_step - task.deadline
+                self.metrics.record_event({"type": "sla_violation", "task": task.task_id, "delay": task.sla_delay, "time": self.time_step})
+
+        # Track robot operational ticks
+        for robot in self.robots.values():
+            if robot.failed:
+                continue
+            if robot.state == "IDLE":
+                robot.idle_ticks += 1
+            elif robot.state in {"CHARGING", "DOCKED_CHARGING"}:
+                robot.charging_ticks += 1
+            elif robot.state in {"WAITING", "NEGOTIATING", "REROUTING"}:
+                robot.stuck_ticks += 1
+
         if self.tasks and all(task.status == "completed" for task in self.tasks.values()) and not self.continuous_dispatch:
             non_home = sorted(robot.robot_id for robot in self.robots.values() if robot.home_position and robot.position != robot.home_position)
             self.returning_robot_id = non_home[0] if non_home else None
 
         for robot in self.robots.values():
+            if robot.failed:
+                robot.state = "FAILED"
+                continue
             if robot.state in {"CHARGING", "DOCKED_CHARGING"}:
                 robot.battery = min(robot.max_battery, robot.battery + 4.0)
                 if robot.battery >= self.config.charge_recovery_threshold:
@@ -534,6 +578,18 @@ class BaseFleetSimulator:
             else:
                 robot.cpu_usage = round(self.rng.uniform(18.0, 32.0), 1)
             robot.ram_usage = round(8.18 + (robot.travelled_distance % 8) * 0.03, 2)
+
+        # Congestion Intelligence & Bottleneck Tracking
+        self.congestion_tracker.record_step(
+            self.time_step,
+            {r.robot_id: r.position for r in self.robots.values()},
+            {r.robot_id: r.state for r in self.robots.values()},
+        )
+        self.congestion_report = self.congestion_tracker.compute_congestion(
+            self.time_step,
+            len(self.robots),
+            [r.current_path for r in self.robots.values() if r.current_path],
+        )
 
         if self.demo_mode:
             self._update_demo_tour_step()
@@ -686,15 +742,21 @@ class BaseFleetSimulator:
         return self.metrics.as_dict()
 
     def build_dashboard_payload(self) -> dict[str, Any]:
+        sla_total = len(self.tasks)
+        completed_tasks = [t for t in self.tasks.values() if t.status == "completed"]
+        sla_met = sum(1 for t in completed_tasks if not t.sla_violated)
+        sla_pct = round((sla_met / max(1, len(completed_tasks))) * 100, 1)
+        sla_violations = sum(1 for t in self.tasks.values() if t.sla_violated)
+
         fleet_cpu = round(sum(r.cpu_usage for r in self.robots.values()) / max(1, len(self.robots)), 1)
         fleet_ram = round(sum(r.ram_usage for r in self.robots.values()) / max(1, len(self.robots)), 2)
         edge_hardware = {
             "avg_cpu_percent": fleet_cpu,
             "avg_ram_gb": fleet_ram,
-            "ping_ms": 8.2,
-            "bandwidth_mbps": 124.5,
-            "dataset_reference": "DEDICAT6G EU Smart Warehouse Operational Baseline",
-            "status": "NOMINAL - EDGE TELEMETRY ACTIVE",
+            "ping_ms": 8.2 if not self.network_degraded else 200.0,
+            "bandwidth_mbps": 124.5 if not self.network_degraded else 18.5,
+            "dataset_reference": "Simulated Edge Telemetry — DEDICAT6G Reference",
+            "status": "NOMINAL - EDGE TELEMETRY ACTIVE" if not self.network_degraded else "DEGRADED - CONSERVATIVE HORIZON",
         }
         return {
             "timestamp": self.time_step,
@@ -707,7 +769,7 @@ class BaseFleetSimulator:
             },
             "continuous_dispatch": self.continuous_dispatch,
             "robots": [r.to_dict() for r in self.robots.values()],
-            "tasks": [{"task_id": t.task_id, "package_id": t.package_id, "pickup": list(t.pickup), "destination": list(t.destination), "status": t.status, "assigned_robot": t.assigned_robot, "priority": t.priority, "created_at": t.created_at, "started_at": t.started_at, "completed_at": t.completed_at, "allocation_reason": t.allocation_reason} for t in self.tasks.values()],
+            "tasks": [t.to_dict() for t in self.tasks.values()],
             "packages": [package.to_dict({rid: robot.position for rid, robot in self.robots.items()}) for package in self.packages.values()],
             "task_counts": {
                 "total": len(self.tasks),
@@ -729,6 +791,16 @@ class BaseFleetSimulator:
             "wfg_cycles": self.active_deadlock_cycles,
             "wfg_edges": self.wait_for_graph.as_edge_list(),
             "edge_hardware": edge_hardware,
+            "congestion": self.congestion_report.to_dict(),
+            "sla": {
+                "compliance_pct": sla_pct,
+                "violations": sla_violations,
+                "total_tracked": sla_total,
+            },
+            "decisions": self.decision_logger.get_recent(20),
+            "recovery_history": [r.to_dict() for r in self.recovery_engine.recovery_history[-5:]],
+            "active_scenario": self.active_scenario,
+            "scenarios": self.scenario_registry.list_scenarios(),
             "demo_tour": {
                 "active": self.demo_mode,
                 "stage": self.demo_stage,
