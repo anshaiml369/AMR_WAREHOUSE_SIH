@@ -53,7 +53,12 @@ class TaskAllocationPolicy:
     def set_mode(self, mode: str | AllocationMode) -> bool:
         try:
             if isinstance(mode, str):
-                mode = AllocationMode(mode.lower())
+                normalized = mode.lower()
+                if normalized == "operator":
+                    normalized = "operator_controlled"
+                elif normalized == "auto":
+                    normalized = "automatic"
+                mode = AllocationMode(normalized)
             self.mode = mode
             return True
         except ValueError:
