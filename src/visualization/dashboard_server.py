@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from src.simulation.simulator import BaselineFleetSimulator, DecentralizedFleetSimulator, SimulationConfig
 from src.simulation.benchmark import run_benchmark
+from src.simulation.scenarios import build_scenario_warehouse
 from src.warehouse.warehouse import Warehouse
 
 
@@ -28,9 +29,12 @@ class LiveDashboard:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.scenario = "default"
-        self.simulator = DecentralizedFleetSimulator(build_demo_warehouse(self.scenario), SimulationConfig(seed=42, robot_count=5, task_count=12))
-        self.simulator.initialize()
-        self.running = True
+        self.simulator = DecentralizedFleetSimulator(
+            build_scenario_warehouse(self.scenario),
+            SimulationConfig(seed=42, robot_count=5, task_count=12),
+        )
+        self.simulator.initialize(create_tasks=True)
+        self.running = False  # Initial state is READY with zero robot movement
         self.speed = 0.22
         self.clients: set[object] = set()
         self.started_at = time.time()
@@ -52,20 +56,30 @@ class LiveDashboard:
             action = message.get("action") or message.get("type")
             if action == "pause":
                 self.running = False
+                self.simulator.simulation_status = "PAUSED"
+                if self.simulator.demo_mode:
+                    self.simulator.demo_paused = True
                 self.simulator.metrics.record_event({"type": "simulation_paused", "time": self.simulator.time_step})
-            elif action == "start" or action == "resume":
+            elif action in {"start", "resume"}:
                 self.running = True
-                if all(r.current_task is None for r in self.simulator.robots.values()):
-                    self.simulator._assign_unassigned_tasks()
+                self.simulator.simulation_status = "RUNNING"
+                if self.simulator.demo_mode:
+                    self.simulator.demo_paused = False
                 self.simulator.metrics.record_event({"type": "simulation_resumed", "time": self.simulator.time_step})
             elif action == "reset":
-                self.simulator = DecentralizedFleetSimulator(build_demo_warehouse(self.scenario), SimulationConfig(seed=42, robot_count=5, task_count=12))
-                self.simulator.initialize()
+                # Clean reset restores READY state with ZERO robot movement and NEVER auto-executes
+                sc_def = self.simulator.scenario_registry.scenarios.get(self.scenario)
+                r_count = sc_def.amr_count if sc_def else 5
+                t_count = sc_def.task_count if sc_def else 12
+                self.simulator = DecentralizedFleetSimulator(
+                    build_scenario_warehouse(self.scenario),
+                    SimulationConfig(seed=42, robot_count=r_count, task_count=t_count),
+                )
+                self.simulator.initialize(create_tasks=True)
                 self.started_at = time.time()
-                self.running = True
-            elif action == "inject_obstacle":
-                self.simulator.inject_obstacle()
-            elif action == "add_obstacle":
+                self.running = False
+                self.simulator.metrics.record_event({"type": "simulation_reset", "status": "READY", "time": 0})
+            elif action == "inject_obstacle" or action == "add_obstacle":
                 self.simulator.inject_obstacle()
             elif action == "remove_obstacle":
                 self.simulator.remove_obstacle()
@@ -83,11 +97,30 @@ class LiveDashboard:
             elif action == "speed":
                 multiplier = max(0.05, min(float(message.get("value", 1.0)), 10.0))
                 self.speed = 0.22 / multiplier
-            elif action == "scenario":
-                self.scenario = str(message.get("name", "default"))
-                self.simulator = DecentralizedFleetSimulator(build_demo_warehouse(self.scenario), SimulationConfig(seed=42, robot_count=5, task_count=12))
-                self.simulator.initialize()
-                self.running = False
+            elif action in {"load_scenario", "scenario"}:
+                sc_id = str(message.get("scenario_id") or message.get("name") or "default")
+                self.scenario = sc_id
+                sc_def = self.simulator.scenario_registry.scenarios.get(sc_id)
+                r_count = sc_def.amr_count if sc_def else 5
+                t_count = sc_def.task_count if sc_def else 10
+                
+                wh = build_scenario_warehouse(sc_id)
+                self.simulator = DecentralizedFleetSimulator(
+                    wh,
+                    SimulationConfig(seed=42, robot_count=r_count, task_count=t_count),
+                )
+                self.simulator.initialize(create_tasks=True)
+                
+                # Apply scenario dynamic obstacles if defined
+                if sc_def and sc_def.obstacles:
+                    for obst in sc_def.obstacles:
+                        self.simulator.warehouse.add_dynamic_obstacle(obst)
+                        if obst not in self.simulator.dynamic_blockages:
+                            self.simulator.dynamic_blockages.append(obst)
+                
+                self.simulator.active_scenario = {"id": sc_id, "name": sc_def.name if sc_def else sc_id}
+                self.running = False  # Keep in READY state
+                self.simulator.metrics.record_event({"type": "scenario_loaded", "scenario_id": sc_id, "time": 0})
             elif action == "toggle_continuous":
                 self.simulator.continuous_dispatch = not self.simulator.continuous_dispatch
                 self.simulator.metrics.record_event({"type": "continuous_dispatch_toggled", "enabled": self.simulator.continuous_dispatch, "time": self.simulator.time_step})
@@ -97,17 +130,19 @@ class LiveDashboard:
                 if robot and not robot.carrying_package_id:
                     self.simulator._send_to_charge(robot)
             elif action == "start_judge_demo":
-                self.simulator.demo_mode = True
-                self.simulator.demo_stage = 1
-                self.simulator.demo_timer = 0
-                self.simulator.demo_banner = "STAGE 1/5: Autonomous Fleet Tasking — Distributed A* Path Planning Initialized"
+                self.simulator.start_judge_demo()
                 self.running = True
-                self.simulator.metrics.record_event({"type": "judge_demo_started", "time": self.simulator.time_step})
+            elif action == "pause_judge_demo":
+                self.simulator.pause_judge_demo()
+                self.running = False
+            elif action == "resume_judge_demo":
+                self.simulator.resume_judge_demo()
+                self.running = True
             elif action == "stop_judge_demo":
-                self.simulator.demo_mode = False
-                self.simulator.demo_stage = 0
-                self.simulator.demo_banner = ""
-                self.simulator.metrics.record_event({"type": "judge_demo_stopped", "time": self.simulator.time_step})
+                self.simulator.stop_judge_demo()
+            elif action == "reset_judge_demo":
+                self.simulator.reset_judge_demo()
+                self.running = False
             elif action == "run_benchmark":
                 def _bg_benchmark():
                     report = run_benchmark_route(seed_count=10, robot_count=5, task_count=12, steps=30)
@@ -171,32 +206,7 @@ class LiveDashboard:
 
 
 def build_demo_warehouse(scenario: str = "default", width: int = 18, height: int = 18) -> Warehouse:
-    warehouse = Warehouse(width=width, height=height)
-    for x in range(width):
-        if x in {0, width - 1}:
-            for y in range(height):
-                warehouse.set_obstacle((x, y))
-    for y in range(height):
-        if y in {0, height - 1}:
-            for x in range(width):
-                warehouse.set_obstacle((x, y))
-    for x in range(2, width - 2):
-        if x % 5 == 0:
-            for y in range(2, height - 2):
-                warehouse.set_obstacle((x, y))
-    if scenario in {"high_traffic", "narrow_aisle", "deadlock_stress"}:
-        for y in range(4, height - 4):
-            if (8, y) not in warehouse.static_obstacles:
-                warehouse.set_obstacle((8, y))
-    if scenario in {"narrow_aisle", "deadlock_stress"}:
-        for x in range(3, width - 3):
-            if (x, 12) not in warehouse.static_obstacles:
-                warehouse.set_obstacle((x, 12))
-    if scenario == "obstacle_demo":
-        warehouse.add_dynamic_obstacle((8, 8))
-    warehouse.add_charging_station((1, 1))
-    warehouse.add_charging_station((1, 16))
-    return warehouse
+    return build_scenario_warehouse(scenario, width, height)
 
 
 LIVE = LiveDashboard()
@@ -204,7 +214,7 @@ LIVE = LiveDashboard()
 
 def run_simulation(seed: int, robot_count: int, task_count: int, steps: int = 30):
     config = SimulationConfig(seed=seed, robot_count=robot_count, task_count=task_count)
-    warehouse = build_demo_warehouse()
+    warehouse = build_scenario_warehouse()
     decentralized = DecentralizedFleetSimulator(warehouse, config)
     d_result = decentralized.run(steps=steps)
     baseline = BaselineFleetSimulator(warehouse, config)
@@ -254,6 +264,49 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+
+        if clean_path.startswith("/api/analytics"):
+            with LIVE.lock:
+                payload = LIVE.simulator.build_dashboard_payload()["analytics"]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
+            return
+
+        if clean_path.startswith("/api/scenarios"):
+            with LIVE.lock:
+                scenarios = LIVE.simulator.scenario_registry.list_scenarios()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(scenarios).encode("utf-8"))
+            return
+
+        if clean_path.startswith("/api/scenario/preview"):
+            query = parse_qs(urlsplit(self.path).query)
+            sc_id = query.get("id", ["aisle_blockage"])[0]
+            with LIVE.lock:
+                preview = LIVE.simulator.scenario_registry.get_preview(sc_id)
+            self.send_response(200 if preview else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(preview or {"error": "Scenario not found"}).encode("utf-8"))
+            return
+
+        if clean_path.startswith("/api/history"):
+            with LIVE.lock:
+                history = LIVE.simulator.run_history
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(history).encode("utf-8"))
+            return
+
         if clean_path.startswith("/api/operator/action"):
             query = parse_qs(urlsplit(self.path).query)
             action_type = query.get("action", [""])[0]
@@ -280,6 +333,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
             return
+
         if clean_path.startswith("/api/operator/speed"):
             query = parse_qs(urlsplit(self.path).query)
             robot_id = query.get("robot_id", [""])[0]
@@ -292,6 +346,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
             return
+
         if clean_path.startswith("/api/operator/allocation"):
             query = parse_qs(urlsplit(self.path).query)
             mode = query.get("mode", ["hybrid"])[0]
@@ -308,6 +363,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
             return
+
         if clean_path.startswith("/api/export/excel") or clean_path.startswith("/api/report/export"):
             from src.reporting.excel_export import export_simulation_to_excel
             with LIVE.lock:
@@ -319,6 +375,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(excel_bytes)
             return
+
         if clean_path.startswith("/api/scenario/run"):
             query = parse_qs(urlsplit(self.path).query)
             scenario_id = query.get("id", ["aisle_blockage"])[0]
@@ -331,6 +388,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result).encode("utf-8"))
             return
+
         if clean_path.startswith("/api/recovery/run"):
             with LIVE.lock:
                 plan = LIVE.simulator.recovery_engine.diagnose_and_recover(LIVE.simulator)
@@ -340,6 +398,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(plan.to_dict()).encode("utf-8"))
             return
+
         if clean_path.startswith("/api/benchmark"):
             query = parse_qs(urlsplit(self.path).query)
             seed_count = int(query.get("seed_count", ["10"])[0])
@@ -353,6 +412,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
+
         if clean_path.startswith("/api/run"):
             query = parse_qs(urlsplit(self.path).query)
             seed = int(query.get("seed", ["42"])[0])
@@ -366,6 +426,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
+
         if clean_path in {"/api/state", "/api/metrics"}:
             payload = LIVE.payload()
             self.send_response(200)
@@ -374,6 +435,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
+
         if clean_path in {"/", "/index.html"}:
             content = HTML_PATH.read_text(encoding="utf-8")
             self.send_response(200)
@@ -381,6 +443,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(content.encode("utf-8"))
             return
+
         super().do_GET()
 
     def do_POST(self):
@@ -421,6 +484,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
             return
+
         if self.path.startswith("/api/operator/speed"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
@@ -438,6 +502,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
             return
+
         if self.path.startswith("/api/operator/allocation"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
@@ -456,6 +521,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
             return
+
         self.send_response(404)
         self.end_headers()
 
