@@ -41,9 +41,16 @@ class AMRRobot:
     stuck_ticks: int = 0
     idle_ticks: int = 0
     charging_ticks: int = 0
+    speed_multiplier: float = 1.0
+    movement_accumulator: float = 0.0
+    target_tasks: int = 0
+    assigned_tasks_count: int = 0
 
     def set_position(self, pos: tuple[int, int]) -> None:
         self.position = pos
+
+    def set_speed(self, speed: float) -> None:
+        self.speed_multiplier = max(0.1, min(2.0, float(speed)))
 
     def update_battery(self, drain: float) -> None:
         self.battery = max(0.0, self.battery - drain)
@@ -87,4 +94,8 @@ class AMRRobot:
             "stuck_ticks": self.stuck_ticks,
             "idle_ticks": self.idle_ticks,
             "charging_ticks": self.charging_ticks,
+            "speed_multiplier": round(self.speed_multiplier, 2),
+            "effective_speed": round(self.speed_multiplier, 2),
+            "target_tasks": self.target_tasks,
+            "assigned_tasks_count": self.assigned_tasks_count,
         }

@@ -69,12 +69,14 @@ def export_simulation_to_excel(sim: "BaseFleetSimulator") -> bytes:
     # 2. Sheet: Tasks
     # -------------------------------------------------------------
     ws_tasks = wb.create_sheet(title="Tasks")
-    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]:
+    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]:
         ws_tasks.column_dimensions[col].width = 16
-    ws_tasks.column_dimensions["L"].width = 35
-    style_table(ws_tasks, ["Task ID", "Package ID", "Priority", "Pickup", "Destination", "Status", "Assigned AMR", "Created", "Completed", "Deadline", "SLA Status", "Allocation Reason"])
+    ws_tasks.column_dimensions["M"].width = 38
+    style_table(ws_tasks, ["Task ID", "Package ID", "Priority", "Pickup", "Destination", "Status", "Assigned AMR", "Allocation Mode", "Created", "Completed", "Deadline", "SLA Status", "Allocation Reason"])
 
     for t in sim.tasks.values():
+        alloc_mode = getattr(t, "allocation_mode", None) or getattr(sim.allocation_policy, "mode", None)
+        alloc_mode_str = alloc_mode.value if hasattr(alloc_mode, "value") else str(alloc_mode or "HYBRID")
         ws_tasks.append([
             t.task_id,
             t.package_id or "N/A",
@@ -83,6 +85,7 @@ def export_simulation_to_excel(sim: "BaseFleetSimulator") -> bytes:
             f"({t.destination[0]},{t.destination[1]})",
             t.status,
             t.assigned_robot or "QUEUED",
+            alloc_mode_str,
             t.created_at,
             t.completed_at or "In Progress",
             t.deadline or "Standard",
@@ -94,14 +97,17 @@ def export_simulation_to_excel(sim: "BaseFleetSimulator") -> bytes:
     # 3. Sheet: AMRs
     # -------------------------------------------------------------
     ws_amrs = wb.create_sheet(title="AMRs")
-    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"]:
+    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]:
         ws_amrs.column_dimensions[col].width = 15
-    style_table(ws_amrs, ["AMR ID", "Position", "Battery (%)", "State", "Cargo", "Completed", "Distance (m)", "Waiting (t)", "CPU (%)", "RAM (GB)", "Health"])
+    style_table(ws_amrs, ["AMR ID", "Position", "Speed Multiplier", "Target Quota", "Assigned Tasks", "Battery (%)", "State", "Cargo", "Completed", "Distance (m)", "Waiting (t)", "CPU (%)", "RAM (GB)", "Health"])
 
     for r in sim.robots.values():
         ws_amrs.append([
             r.robot_id,
             f"({r.position[0]},{r.position[1]})",
+            f"{r.speed_multiplier:.1f}x",
+            r.target_tasks if r.target_tasks is not None else "Auto",
+            r.assigned_tasks_count,
             round(r.battery, 1),
             r.state,
             r.carrying_package_id or "None",

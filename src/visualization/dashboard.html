@@ -685,6 +685,19 @@
       color: var(--muted);
       line-height: 1.5;
     }
+    .alloc-table th { font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+    .alloc-table td { padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .btn-xs {
+      background: #112830;
+      border: 1px solid #234854;
+      color: var(--cyan);
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .btn-xs:hover { background: var(--cyan); color: #000; }
 
     @media (max-width: 1100px) {
       .scenario-grid { grid-template-columns: repeat(3, 1fr); }
@@ -956,6 +969,75 @@
       </div>
     </section>
 
+    <!-- Task Allocation & Workload Distribution Engine -->
+    <section class="panel" style="margin-top: 12px;">
+      <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span>Task Allocation & Workload Distribution Engine</span>
+          <span class="badge-sm" id="activeAllocationModeBadge" style="background:#0e3630; border:1px solid var(--green); color:var(--green); font-size:10px; padding:2px 8px; border-radius:10px;">MODE: HYBRID</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:11px; color:var(--muted);">Dynamic Failure Redistribution:</span>
+          <span style="font-size:10px; color:var(--green); font-weight:700; background:#0e3630; padding:2px 6px; border-radius:3px;">ACTIVE (Auto-reallocates on AMR fault)</span>
+        </div>
+      </div>
+
+      <div class="allocation-grid" style="display:grid; grid-template-columns: 1.15fr 0.85fr; gap:16px; margin-top:10px;">
+        <!-- Left Column: Controls & Per-AMR Targets -->
+        <div>
+          <div style="display:flex; gap:14px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+            <span style="font-size:11px; color:var(--text); font-weight:700;">Allocation Policy:</span>
+            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted); cursor:pointer;">
+              <input type="radio" name="allocationMode" value="AUTOMATIC" onchange="window.setAllocationMode(this.value)"> Automatic (Load Balanced)
+            </label>
+            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted); cursor:pointer;">
+              <input type="radio" name="allocationMode" value="OPERATOR_CONTROLLED" onchange="window.setAllocationMode(this.value)"> Operator Controlled (Strict Quotas)
+            </label>
+            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:var(--cyan); font-weight:700; cursor:pointer;">
+              <input type="radio" name="allocationMode" value="HYBRID" checked onchange="window.setAllocationMode(this.value)"> Hybrid (Balanced Quotas + Priority Override)
+            </label>
+          </div>
+
+          <table class="alloc-table" style="width:100%; border-collapse:collapse; font-size:11px; text-align:left;">
+            <thead>
+              <tr style="border-bottom:1px solid var(--line); color:var(--muted);">
+                <th style="padding:6px 4px;">AMR ID</th>
+                <th style="padding:6px 4px;">Hardware State</th>
+                <th style="padding:6px 4px;">Assigned</th>
+                <th style="padding:6px 4px;">Target Quota</th>
+                <th style="padding:6px 4px;">Progress</th>
+                <th style="padding:6px 4px;">Velocity</th>
+              </tr>
+            </thead>
+            <tbody id="allocationTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+
+          <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+            <button class="op-btn" onclick="setTargetPreset('balanced')">⚖️ Equal Quota (2 each)</button>
+            <button class="op-btn" onclick="setTargetPreset('specialized')">⚡ High-Capacity (AMR-0/1: 5/4)</button>
+            <button class="op-btn warn" onclick="setTargetPreset('clear')">✕ Clear Targets</button>
+            <button class="primary" style="margin-left:auto; padding:6px 14px; font-weight:700;" onclick="applyTaskAllocation()">APPLY TASK ALLOCATION</button>
+          </div>
+        </div>
+
+        <!-- Right Column: Explainability & Why Audit Log -->
+        <div style="background:#09151c; border:1px solid #1c3640; border-radius:6px; padding:12px; display:flex; flex-direction:column;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-size:11px; font-weight:700; color:var(--cyan);">Live Assignment Audit & "Why?" Explanation</span>
+            <span style="font-size:10px; color:var(--muted);">DECISION ENGINE</span>
+          </div>
+          <div id="allocationAuditLog" style="flex:1; max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
+            <span style="color:var(--muted); font-size:11px;">Initializing allocation telemetry...</span>
+          </div>
+          <div style="border-top:1px solid #152b33; margin-top:8px; padding-top:8px; font-size:10.5px; color:var(--muted); line-height:1.4;">
+            <strong style="color:var(--text);">Hybrid Rule:</strong> AMRs with remaining target quota receive high dispatch priority (+50 pts). Critical emergency tasks (Priority ≥ 4) automatically override quota caps if other AMRs are distant or low battery.
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Bottom Panels: Event Stream & Task Execution -->
     <section class="bottom">
       <div class="panel">
@@ -1105,6 +1187,115 @@
         send('operator_action', { op_type: actionType, cell: parts, reason: 'Operator manual aisle control' });
       }
     };
+
+    let isEditingTargets = false;
+
+    window.setAllocationMode = function(mode) {
+      const badge = $('activeAllocationModeBadge');
+      if (badge) badge.textContent = `MODE: ${mode}`;
+      send('set_task_allocation', { mode: mode, targets: getEnteredTargets() });
+    };
+
+    function getEnteredTargets() {
+      const targets = {};
+      document.querySelectorAll('.amr-target-input').forEach(inp => {
+        const rId = inp.dataset.robotId;
+        const val = inp.value.trim();
+        if (val !== '' && !isNaN(parseInt(val, 10))) {
+          targets[rId] = parseInt(val, 10);
+        }
+      });
+      return targets;
+    }
+
+    window.applyTaskAllocation = function() {
+      const mode = document.querySelector('input[name="allocationMode"]:checked')?.value || 'HYBRID';
+      const targets = getEnteredTargets();
+      send('set_task_allocation', { mode: mode, targets: targets });
+    };
+
+    window.updateRobotSpeed = function(robotId, speedVal) {
+      const speed = Math.max(0.1, Math.min(2.0, parseFloat(speedVal)));
+      send('set_robot_speed', { robot_id: robotId, speed: speed });
+      const badge = $(`speed_badge_${robotId}`);
+      if (badge) badge.textContent = `${speed.toFixed(1)}x`;
+    };
+
+    window.setTargetPreset = function(presetType) {
+      const inputs = document.querySelectorAll('.amr-target-input');
+      if (presetType === 'balanced') {
+        inputs.forEach(inp => inp.value = 2);
+      } else if (presetType === 'specialized') {
+        inputs.forEach((inp, idx) => {
+          inp.value = idx === 0 ? 5 : (idx === 1 ? 4 : 1);
+        });
+      } else if (presetType === 'clear') {
+        inputs.forEach(inp => inp.value = '');
+      }
+      applyTaskAllocation();
+    };
+
+    function updateAllocationUI(data) {
+      if (!data) return;
+      const alloc = data.allocation || {};
+      const mode = alloc.mode || 'HYBRID';
+      const badge = $('activeAllocationModeBadge');
+      if (badge) badge.textContent = `MODE: ${mode}`;
+
+      const radio = document.querySelector(`input[name="allocationMode"][value="${mode}"]`);
+      if (radio && document.activeElement !== radio && !document.activeElement?.name?.includes('allocationMode')) {
+        radio.checked = true;
+      }
+
+      const tbody = $('allocationTableBody');
+      if (tbody) {
+        const robots = data.robots || [];
+        const hasFocusInside = tbody.contains(document.activeElement);
+        if (!hasFocusInside && !isEditingTargets) {
+          tbody.innerHTML = robots.map(r => {
+            const target = (r.target_tasks !== undefined && r.target_tasks !== null) ? r.target_tasks : '';
+            const assigned = r.assigned_tasks_count || 0;
+            const pct = target ? Math.min(100, Math.round((assigned / target) * 100)) : 0;
+            const statusBadge = r.failed ? '<span style="color:var(--red); font-weight:700;">FAULT</span>' : `<span style="color:var(--green);">${r.state}</span>`;
+            return `
+              <tr>
+                <td style="font-weight:700; color:var(--text);">${r.robot_id}</td>
+                <td>${statusBadge}</td>
+                <td style="color:var(--cyan); font-weight:600;">${assigned}</td>
+                <td>
+                  <input type="number" min="0" max="50" class="amr-target-input" data-robot-id="${r.robot_id}"
+                         value="${target}" placeholder="Auto"
+                         onfocus="isEditingTargets = true"
+                         onblur="setTimeout(() => isEditingTargets = false, 500)"
+                         style="width:55px; padding:2px 4px; background:#071015; border:1px solid var(--line); color:var(--text); border-radius:3px; font-size:11px; text-align:center;" />
+                </td>
+                <td>
+                  <div style="display:flex; align-items:center; gap:6px;">
+                    <div class="bar" style="width:55px; margin:0; height:5px;"><b style="width:${target ? pct : 0}%; background:${pct >= 100 ? 'var(--cyan)' : 'var(--amber)'};"></b></div>
+                    <span style="font-size:10px; color:var(--muted);">${target ? pct + '%' : '—'}</span>
+                  </div>
+                </td>
+                <td><span style="color:var(--cyan); font-size:11px; font-weight:600;">${(r.speed_multiplier !== undefined ? Number(r.speed_multiplier) : 1.0).toFixed(1)}x</span></td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      if ($('allocationAuditLog')) {
+        const reasons = alloc.recent_reasons || [];
+        if (reasons.length > 0) {
+          $('allocationAuditLog').innerHTML = reasons.slice(-5).reverse().map(item => `
+            <div style="padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:10.5px;">
+              <strong style="color:var(--cyan);">${item.task_id || 'Task'} → ${item.robot_id}</strong>:
+              <span style="color:#d4e5e4;">${item.reason}</span>
+            </div>
+          `).join('');
+        } else {
+          $('allocationAuditLog').innerHTML = `<span style="color:var(--muted); font-size:11px;">Active Mode: <strong>${mode}</strong>. Workload dynamically distributed across operational AMRs.</span>`;
+        }
+      }
+    }
 
     const eventText = (event) => {
       if (event.type === 'simulation_started') return 'simulation initialized';
@@ -1368,7 +1559,11 @@
       }
 
       // Fleet list
-      $('fleet').innerHTML = robots.map(r => `
+      $('fleet').innerHTML = robots.map(r => {
+        const speedVal = (r.speed_multiplier !== undefined ? Number(r.speed_multiplier) : 1.0).toFixed(1);
+        const assignedCount = r.assigned_tasks_count || 0;
+        const targetStr = (r.target_tasks !== undefined && r.target_tasks !== null) ? `Target: ${assignedCount}/${r.target_tasks}` : `Assigned: ${assignedCount}`;
+        return `
         <div class="robot-card ${r.state.toLowerCase()}${r.failed ? ' failed' : ''}">
           <div class="robot-head">
             <span>${r.robot_id}</span>
@@ -1379,14 +1574,28 @@
             <span>(${r.position[0]}, ${r.position[1]})</span>
           </div>
           <div class="robot-meta">
-            <span>Battery: ${r.battery}%</span>
+            <span>Battery: ${Math.round(r.battery)}%</span>
             <span>CPU: ${r.cpu_usage || 24}% · RAM: ${r.ram_usage || 8.2}G</span>
           </div>
-          ${r.failed ? `<div class="robot-meta" style="color:var(--red); font-size:10px;"><span>Fault:</span><span>${r.failure_reason || 'actuator fault'}</span></div>` : ''}
-          ${r.negotiating_with ? `<div class="robot-meta" style="color:var(--amber); font-size:10px;"><span>P2P Bidding with:</span><span>${r.negotiating_with}</span></div>` : ''}
+          <div class="robot-meta" style="margin-top:4px; font-size:11px;">
+            <span style="color:var(--cyan); font-weight:600;">Speed: <span id="speed_badge_${r.robot_id}">${speedVal}x</span></span>
+            <span style="color:var(--muted); font-size:10px;">${targetStr}</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:5px; margin-top:3px;">
+            <input type="range" min="0.1" max="2.0" step="0.1" value="${speedVal}"
+              oninput="const b=document.getElementById('speed_badge_${r.robot_id}'); if(b) b.textContent = parseFloat(this.value).toFixed(1) + 'x'"
+              onchange="updateRobotSpeed('${r.robot_id}', this.value)"
+              style="flex:1; height:4px; accent-color:var(--cyan); cursor:pointer;" title="Adjust physical movement velocity (0.1x to 2.0x)" />
+            <button type="button" class="btn-xs" onclick="updateRobotSpeed('${r.robot_id}', 0.5)">0.5x</button>
+            <button type="button" class="btn-xs" onclick="updateRobotSpeed('${r.robot_id}', 1.0)">1.0x</button>
+            <button type="button" class="btn-xs" onclick="updateRobotSpeed('${r.robot_id}', 2.0)">2.0x</button>
+          </div>
+          ${r.failed ? `<div class="robot-meta" style="color:var(--red); font-size:10px; margin-top:4px;"><span>Fault:</span><span>${r.failure_reason || 'actuator fault'}</span></div>` : ''}
+          ${r.negotiating_with ? `<div class="robot-meta" style="color:var(--amber); font-size:10px; margin-top:2px;"><span>P2P Bidding with:</span><span>${r.negotiating_with}</span></div>` : ''}
           <div class="bar"><b style="width:${r.battery}%"></b></div>
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       // Tasks
       $('tasks').innerHTML = tasks.map(t => `
@@ -1413,6 +1622,9 @@
       // P2P activity
       const peerEvents = events.filter(e => e.type === 'peer_message' || e.type === 'p2p_negotiation').slice(-5);
       $('p2p').innerHTML = peerEvents.length ? peerEvents.map(e => `<div class="event"><em>T+${e.time ?? data.timestamp}</em>${eventText(e)}</div>`).join('') : '<span style="color:var(--muted)">No peer traffic yet</span>';
+
+      // Update Task Allocation & Workload Distribution section
+      updateAllocationUI(data);
     }
 
     function connect() {

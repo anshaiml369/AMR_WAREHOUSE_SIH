@@ -27,6 +27,7 @@ from src.coordination.priority import (
     PriorityEvaluator,
     PriorityWeights,
 )
+from src.coordination.allocation import TaskAllocationPolicy, AllocationMode
 from src.tasks.package import Package
 from src.tasks.task import Task
 from src.warehouse.warehouse import Warehouse
@@ -79,6 +80,8 @@ class BaseFleetSimulator:
         self.priority_evaluator = PriorityEvaluator()
         self.incident_manager = IncidentManager()
         self.operator_actions: list[dict[str, Any]] = []
+        self.allocation_policy = TaskAllocationPolicy(AllocationMode.HYBRID)
+        self.global_speed_multiplier: float = 1.0
         self.active_scenario: dict[str, Any] | None = None
         self.network_degraded: bool = False
         self.edge_hardware: dict[str, Any] = {
@@ -166,6 +169,10 @@ class BaseFleetSimulator:
             path = a_star(robot.position, task.pickup, self.warehouse, blocked)
             if len(path) == 1 and robot.position != task.pickup:
                 continue
+            is_emerg = bool(task.priority >= 5 or task.metadata.get("is_emergency"))
+            allowed, alloc_msg = self.allocation_policy.can_assign(robot.robot_id, task.priority, is_emerg)
+            if not allowed:
+                continue
             distance = max(0, len(path) - 1)
             p_eval = self.priority_evaluator.evaluate(
                 robot_id=robot.robot_id,
@@ -176,10 +183,14 @@ class BaseFleetSimulator:
                 deadline=task.deadline,
                 remaining_distance=distance,
                 congestion_score=self.congestion_report.score,
-                is_emergency=bool(task.metadata.get("is_emergency")),
+                is_emergency=is_emerg,
             )
-            score = distance + max(0.0, 100.0 - robot.battery) * 0.05 - (p_eval.score * 0.1)
-            reason = f"score={score:.1f}; class={p_eval.priority_class.name}; path={distance}; battery={robot.battery:.1f}; priority={task.priority}; feasible=true; {p_eval.explanation}"
+            target_obj = self.allocation_policy.targets.get(robot.robot_id)
+            quota_factor = 0.0
+            if target_obj and target_obj.target_tasks > 0:
+                quota_factor = (target_obj.assigned_tasks / target_obj.target_tasks) * 2.0
+            score = distance + max(0.0, 100.0 - robot.battery) * 0.05 - (p_eval.score * 0.1) + quota_factor
+            reason = f"score={score:.1f}; class={p_eval.priority_class.name}; path={distance}; battery={robot.battery:.1f}; priority={task.priority}; feasible=true; alloc={alloc_msg}; {p_eval.explanation}"
             candidates.append((score, robot.robot_id, reason))
         if not candidates:
             if task.priority >= 5 or task.metadata.get("is_emergency"):
@@ -216,6 +227,8 @@ class BaseFleetSimulator:
         old_task.status = "pending"
         old_task.reassignment_count += 1
         old_task.metadata["preempted_by"] = emergency_task.task_id
+        self.allocation_policy.unassign(chosen_robot.robot_id)
+        chosen_robot.assigned_tasks_count = max(0, chosen_robot.assigned_tasks_count - 1)
 
         self.decision_logger.log(
             decision_type="EMERGENCY_PREEMPTION",
@@ -446,6 +459,8 @@ class BaseFleetSimulator:
                 task.assigned_robot = robot_id
                 self.robots[robot_id].current_task = task.task_id
                 self.robots[robot_id].state = "MOVING_TO_PICKUP"
+                self.robots[robot_id].assigned_tasks_count += 1
+                self.allocation_policy.record_assignment(robot_id)
                 task.status = "in_progress"
                 task.started_at = self.time_step
                 task.allocation_reason = allocation_reason
@@ -601,49 +616,67 @@ class BaseFleetSimulator:
                 if robot.state not in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"}:
                     robot.state = "IDLE"
                 continue
-            if robot.position == task.pickup and robot.carrying_package_id is None:
-                self._pickup_package(robot, task)
-                robot.current_goal = task.destination
-                task.status = "moving_to_dropoff"
-                robot.state = "MOVING_TO_DROPOFF"
-            if robot.position == task.destination and robot.carrying_package_id:
-                self._deliver_package(robot, task)
+            # Speed accumulator for physical movement rate
+            robot.movement_accumulator += robot.speed_multiplier
+            steps_budget = int(robot.movement_accumulator)
+            robot.movement_accumulator -= steps_budget
+
+            if steps_budget < 1:
                 continue
-            if not robot.current_path or robot.position == robot.current_path[-1]:
-                robot.current_path = self._plan_path_for_robot(robot)
-            elif any(not self.warehouse.is_walkable(cell) for cell in robot.current_path):
-                robot.current_path = self._plan_path_for_robot(robot)
-                robot.state = "REROUTING"
-                self.metrics.replanning_events += 1
-                self.metrics.record_event({"type": "route_replanned", "robot": robot.robot_id, "time": self.time_step})
-            if len(robot.current_path) > 1:
-                next_cell = robot.current_path[1]
-                if self._move_robot(robot, next_cell):
-                    self.metrics.messages_sent += 1
-                    robot.current_path = robot.current_path[1:]
-                    if robot.position == task.destination and robot.carrying_package_id:
-                        self._deliver_package(robot, task)
-                        continue
-                elif robot.waiting_time >= 6:
+
+            for _ in range(steps_budget):
+                if robot.current_task is None:
+                    break
+                task = self.tasks.get(robot.current_task)
+                if task is None:
+                    break
+                if robot.position == task.pickup and robot.carrying_package_id is None:
+                    self._pickup_package(robot, task)
+                    robot.current_goal = task.destination
+                    task.status = "moving_to_dropoff"
+                    robot.state = "MOVING_TO_DROPOFF"
+                if robot.position == task.destination and robot.carrying_package_id:
+                    self._deliver_package(robot, task)
+                    break
+                if not robot.current_path or robot.position == robot.current_path[-1]:
+                    robot.current_path = self._plan_path_for_robot(robot)
+                elif any(not self.warehouse.is_walkable(cell) for cell in robot.current_path):
+                    robot.current_path = self._plan_path_for_robot(robot)
                     robot.state = "REROUTING"
-                    robot.current_path = []
-                    robot.waiting_time = 0
-                    self.metrics.deadlocks += 1
                     self.metrics.replanning_events += 1
-                    self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
-                    self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
-            else:
-                robot.state = "WAITING"
-                self.metrics.waiting_time += 1
-                robot.waiting_time += 1
-                if robot.waiting_time >= 6:
-                    robot.state = "REROUTING"
-                    robot.current_path = []
-                    robot.waiting_time = 0
-                    self.metrics.deadlocks += 1
-                    self.metrics.replanning_events += 1
-                    self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
-                    self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                    self.metrics.record_event({"type": "route_replanned", "robot": robot.robot_id, "time": self.time_step})
+                if len(robot.current_path) > 1:
+                    next_cell = robot.current_path[1]
+                    if self._move_robot(robot, next_cell):
+                        self.metrics.messages_sent += 1
+                        robot.current_path = robot.current_path[1:]
+                        if robot.position == task.destination and robot.carrying_package_id:
+                            self._deliver_package(robot, task)
+                            break
+                    elif robot.waiting_time >= 6:
+                        robot.state = "REROUTING"
+                        robot.current_path = []
+                        robot.waiting_time = 0
+                        self.metrics.deadlocks += 1
+                        self.metrics.replanning_events += 1
+                        self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
+                        self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                        break
+                    else:
+                        break
+                else:
+                    robot.state = "WAITING"
+                    self.metrics.waiting_time += 1
+                    robot.waiting_time += 1
+                    if robot.waiting_time >= 6:
+                        robot.state = "REROUTING"
+                        robot.current_path = []
+                        robot.waiting_time = 0
+                        self.metrics.deadlocks += 1
+                        self.metrics.replanning_events += 1
+                        self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
+                        self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                    break
 
         # Graph-theoretic Wait-For Graph (WFG) cycle detection & breaking
         self._detect_and_resolve_wfg_deadlocks()
@@ -775,6 +808,7 @@ class BaseFleetSimulator:
         package.position = task.destination
         robot.carrying_package_id = None
         robot.completed_tasks += 1
+        self.allocation_policy.record_completion(robot.robot_id)
         robot.task_history.append(task.task_id)
         task.status = "completed"
         task.completion_time = self.time_step
@@ -928,6 +962,44 @@ class BaseFleetSimulator:
         )
         return True
 
+    def fail_robot(self, robot_id: str, reason: str = "Hardware stall") -> bool:
+        robot = self.robots.get(robot_id)
+        if not robot:
+            return False
+        robot.failed = True
+        robot.state = "FAILED"
+        robot.failure_reason = reason
+        dropped_pkg_id = robot.carrying_package_id
+        failed_task_id = robot.current_task
+
+        if dropped_pkg_id and dropped_pkg_id in self.packages:
+            pkg = self.packages[dropped_pkg_id]
+            pkg.state = "waiting"
+            pkg.position = robot.position
+            pkg.carried_by_robot = None
+            robot.carrying_package_id = None
+
+        if failed_task_id and failed_task_id in self.tasks:
+            task = self.tasks[failed_task_id]
+            task.status = "pending"
+            task.assigned_robot = None
+            task.reassignment_count += 1
+            task.reassigned_from.append(robot.robot_id)
+            if dropped_pkg_id:
+                task.pickup = robot.position
+            robot.current_task = None
+            robot.current_goal = None
+            robot.current_path = []
+
+        available = [r.robot_id for r in self.robots.values() if not r.failed and r.robot_id != robot_id]
+        redistributed = self.allocation_policy.reallocate_on_failure(robot_id, available)
+        for rid, added in redistributed.items():
+            if rid in self.robots:
+                self.robots[rid].target_tasks += added
+
+        self.metrics.record_event({"type": "amr_failed", "robot": robot_id, "reason": reason, "time": self.time_step})
+        return True
+
     def operator_resume_robot(self, robot_id: str, reason: str = "Operator manual resume") -> bool:
         robot = self.robots.get(robot_id)
         if not robot:
@@ -993,6 +1065,82 @@ class BaseFleetSimulator:
             self.operator_actions.append(action)
             return True
         return False
+
+    def set_robot_speed(self, robot_id: str, speed: float, reason: str = "Operator speed adjustment") -> tuple[bool, str]:
+        robot = self.robots.get(robot_id)
+        if not robot:
+            return False, f"Robot {robot_id} not found"
+        if speed < 0.1 or speed > 2.0:
+            return False, f"Speed {speed}x outside permitted range [0.1x, 2.0x]"
+        prev_speed = robot.speed_multiplier
+        robot.speed_multiplier = round(float(speed), 2)
+        robot.velocity = robot.speed_multiplier
+        action = {
+            "timestamp": self.time_step,
+            "action": "set_robot_speed",
+            "target": robot_id,
+            "previous_state": f"{prev_speed:.1f}x",
+            "new_state": f"{robot.speed_multiplier:.1f}x",
+            "reason": reason,
+            "authority": "OPERATOR_OVERRIDE",
+        }
+        self.operator_actions.append(action)
+        self.decision_logger.log(
+            decision_type="OPERATOR_OVERRIDE",
+            category="OPERATOR_ACTION",
+            problem=f"Configure operational travel speed for {robot_id}",
+            reason=f"Operator adjustment from {prev_speed:.1f}x to {robot.speed_multiplier:.1f}x ({reason})",
+            outcome=f"{robot_id} velocity={robot.speed_multiplier:.1f}x",
+            timestamp=self.time_step,
+            affected_robots=[robot_id],
+        )
+        self.metrics.record_event({
+            "type": "robot_speed_changed",
+            "robot": robot_id,
+            "previous_speed": prev_speed,
+            "speed": robot.speed_multiplier,
+            "time": self.time_step,
+        })
+        return True, f"{robot_id} speed updated to {robot.speed_multiplier:.1f}x"
+
+    def set_task_allocation(self, mode: str, targets: dict[str, int], reason: str = "Operator workload policy update") -> tuple[bool, str]:
+        prev_mode = self.allocation_policy.mode.value
+        if not self.allocation_policy.set_mode(mode):
+            return False, f"Invalid allocation mode: {mode}"
+
+        ok, msg = self.allocation_policy.set_targets(targets, len(self.tasks))
+        if not ok:
+            return False, msg
+
+        for rid, target_val in targets.items():
+            if rid in self.robots:
+                self.robots[rid].target_tasks = int(target_val)
+
+        action = {
+            "timestamp": self.time_step,
+            "action": "set_task_allocation",
+            "target": f"Mode: {mode}",
+            "previous_state": f"Mode: {prev_mode}",
+            "new_state": f"Mode: {mode}, targets={targets}",
+            "reason": reason,
+            "authority": "OPERATOR_OVERRIDE",
+        }
+        self.operator_actions.append(action)
+        self.decision_logger.log(
+            decision_type="OPERATOR_OVERRIDE",
+            category="OPERATOR_ACTION",
+            problem="Update fleet workload distribution and allocation mode",
+            reason=f"{reason}. Quotas: {targets}",
+            outcome=f"Allocation mode set to {mode.upper()} with {len(targets)} robot quotas",
+            timestamp=self.time_step,
+        )
+        self.metrics.record_event({
+            "type": "task_allocation_updated",
+            "mode": mode,
+            "targets": targets,
+            "time": self.time_step,
+        })
+        return True, f"Task allocation policy set to {mode} with {len(targets)} targets"
 
     def build_dashboard_payload(self) -> dict[str, Any]:
         sla_total = len(self.tasks)
@@ -1078,6 +1226,8 @@ class BaseFleetSimulator:
                 "timer": self.demo_timer,
                 "banner": self.demo_banner,
             },
+            "allocation": self.allocation_policy.get_summary(),
+            "global_speed": round(self.global_speed_multiplier, 2),
             "benchmark_summary": self.latest_benchmark_summary,
         }
 

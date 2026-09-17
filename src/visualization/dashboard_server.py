@@ -55,6 +55,8 @@ class LiveDashboard:
                 self.simulator.metrics.record_event({"type": "simulation_paused", "time": self.simulator.time_step})
             elif action == "start" or action == "resume":
                 self.running = True
+                if all(r.current_task is None for r in self.simulator.robots.values()):
+                    self.simulator._assign_unassigned_tasks()
                 self.simulator.metrics.record_event({"type": "simulation_resumed", "time": self.simulator.time_step})
             elif action == "reset":
                 self.simulator = DecentralizedFleetSimulator(build_demo_warehouse(self.scenario), SimulationConfig(seed=42, robot_count=5, task_count=12))
@@ -152,6 +154,15 @@ class LiveDashboard:
                     self.simulator.operator_close_aisle((int(cell[0]), int(cell[1])), reason)
                 elif op_type == "open_aisle" and cell:
                     self.simulator.operator_open_aisle((int(cell[0]), int(cell[1])), reason)
+            elif action == "set_robot_speed":
+                robot_id = str(message.get("robot_id", ""))
+                speed = float(message.get("speed", 1.0))
+                self.simulator.set_robot_speed(robot_id, speed)
+            elif action == "set_task_allocation":
+                mode = str(message.get("mode", "hybrid"))
+                raw_targets = message.get("targets", {})
+                targets = {k: int(v) for k, v in raw_targets.items()}
+                self.simulator.set_task_allocation(mode, targets)
 
     def tick(self) -> None:
         with self.lock:
@@ -222,8 +233,9 @@ def run_benchmark_route(seed_count: int = 10, robot_count: int = 5, task_count: 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith("/static/"):
-            rel_path = self.path[len("/static/"):].split("?")[0]
+        clean_path = urlsplit(self.path).path
+        if clean_path.startswith("/static/"):
+            rel_path = clean_path[len("/static/"):]
             static_file = (ROOT / "static" / rel_path).resolve()
             if static_file.is_file() and str(static_file).startswith(str((ROOT / "static").resolve())):
                 content_type = "application/octet-stream"
@@ -242,7 +254,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        if self.path.startswith("/api/operator/action"):
+        if clean_path.startswith("/api/operator/action"):
             query = parse_qs(urlsplit(self.path).query)
             action_type = query.get("action", [""])[0]
             robot_id = query.get("robot_id", [""])[0]
@@ -268,7 +280,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
             return
-        if self.path.startswith("/api/export/excel") or self.path.startswith("/api/report/export"):
+        if clean_path.startswith("/api/operator/speed"):
+            query = parse_qs(urlsplit(self.path).query)
+            robot_id = query.get("robot_id", [""])[0]
+            speed = float(query.get("speed", ["1.0"])[0])
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.set_robot_speed(robot_id, speed)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
+        if clean_path.startswith("/api/operator/allocation"):
+            query = parse_qs(urlsplit(self.path).query)
+            mode = query.get("mode", ["hybrid"])[0]
+            raw_targets = query.get("targets", ["{}"])[0]
+            try:
+                targets = json.loads(raw_targets)
+            except Exception:
+                targets = {}
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.set_task_allocation(mode, targets)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
+        if clean_path.startswith("/api/export/excel") or clean_path.startswith("/api/report/export"):
             from src.reporting.excel_export import export_simulation_to_excel
             with LIVE.lock:
                 excel_bytes = export_simulation_to_excel(LIVE.simulator)
@@ -279,7 +319,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(excel_bytes)
             return
-        if self.path.startswith("/api/scenario/run"):
+        if clean_path.startswith("/api/scenario/run"):
             query = parse_qs(urlsplit(self.path).query)
             scenario_id = query.get("id", ["aisle_blockage"])[0]
             with LIVE.lock:
@@ -291,7 +331,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result).encode("utf-8"))
             return
-        if self.path.startswith("/api/recovery/run"):
+        if clean_path.startswith("/api/recovery/run"):
             with LIVE.lock:
                 plan = LIVE.simulator.recovery_engine.diagnose_and_recover(LIVE.simulator)
             self.send_response(200)
@@ -300,7 +340,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(plan.to_dict()).encode("utf-8"))
             return
-        if self.path.startswith("/api/benchmark"):
+        if clean_path.startswith("/api/benchmark"):
             query = parse_qs(urlsplit(self.path).query)
             seed_count = int(query.get("seed_count", ["10"])[0])
             robots = int(query.get("robots", ["5"])[0])
@@ -313,7 +353,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
-        if self.path.startswith("/api/run"):
+        if clean_path.startswith("/api/run"):
             query = parse_qs(urlsplit(self.path).query)
             seed = int(query.get("seed", ["42"])[0])
             robots = int(query.get("robots", ["5"])[0])
@@ -326,7 +366,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
-        if self.path == "/api/state":
+        if clean_path in {"/api/state", "/api/metrics"}:
             payload = LIVE.payload()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -334,7 +374,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
-        if self.path in {"/", "/index.html"}:
+        if clean_path in {"/", "/index.html"}:
             content = HTML_PATH.read_text(encoding="utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -381,6 +421,41 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
             return
+        if self.path.startswith("/api/operator/speed"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            robot_id = str(data.get("robot_id", ""))
+            speed = float(data.get("speed", 1.0))
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.set_robot_speed(robot_id, speed)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
+        if self.path.startswith("/api/operator/allocation"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            mode = str(data.get("mode", "hybrid"))
+            raw_targets = data.get("targets", {})
+            targets = {k: int(v) for k, v in raw_targets.items()}
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.set_task_allocation(mode, targets)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -408,11 +483,19 @@ async def websocket_handler(websocket):
 async def websocket_loop(host: str = "127.0.0.1", port: int = 8765):
     async with websockets.serve(websocket_handler, host, port):
         while True:
-            LIVE.tick()
-            payload = json.dumps(LIVE.payload())
-            clients = list(LIVE.clients)
-            if clients:
-                await asyncio.gather(*(client.send(payload) for client in clients), return_exceptions=True)
+            try:
+                LIVE.tick()
+                payload = json.dumps(LIVE.payload())
+                dead_clients = set()
+                for client in list(LIVE.clients):
+                    try:
+                        await asyncio.wait_for(client.send(payload), timeout=0.25)
+                    except Exception:
+                        dead_clients.add(client)
+                for dc in dead_clients:
+                    LIVE.clients.discard(dc)
+            except Exception as loop_err:
+                print(f"[WebSocket Loop Warning] {loop_err}")
             await asyncio.sleep(LIVE.speed)
 
 

@@ -386,18 +386,17 @@ class DigitalTwin3D {
         this.scene.add(mesh);
       }
 
-      // Smoothly interpolate position towards target
+      // Store target position for smooth 60 FPS lerping in animate()
       const targetPos = this.cellToWorld(r.position[0], r.position[1]);
-      mesh.position.lerp(targetPos, 0.25);
+      mesh.userData.targetPosition = targetPos;
 
-      // Orientation
+      // Calculate target orientation
       if (r.path && r.path.length > 1) {
         const nextCell = r.path[1];
         const nextPos = this.cellToWorld(nextCell[0], nextCell[1]);
         const dir = nextPos.clone().sub(mesh.position);
         if (dir.lengthSq() > 0.001) {
-          const targetAngle = Math.atan2(dir.x, dir.z);
-          mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, targetAngle, 0.2);
+          mesh.userData.targetRotationY = Math.atan2(dir.x, dir.z);
         }
       }
 
@@ -455,15 +454,17 @@ class DigitalTwin3D {
     ctx.fill();
     ctx.stroke();
 
-    // Robot ID & State
-    ctx.font = 'bold 26px Inter, sans-serif';
+    // Robot ID & Speed Multiplier
+    const speedMult = (r.speed_multiplier !== undefined ? Number(r.speed_multiplier) : 1.0).toFixed(1);
+    ctx.font = 'bold 24px Inter, sans-serif';
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(`${r.robot_id}`, 18, 38);
+    ctx.fillText(`${r.robot_id} [${speedMult}x]`, 16, 34);
 
-    // Battery / Task Text
-    ctx.font = '20px Inter, sans-serif';
+    // Battery / State & Target count
+    ctx.font = '18px Inter, sans-serif';
     ctx.fillStyle = r.battery < 25 ? '#ef4444' : '#7be28b';
-    ctx.fillText(`⚡${Math.round(r.battery)}%  [${r.state}]`, 18, 64);
+    const targetStr = (r.target_tasks !== undefined && r.target_tasks !== null) ? ` (${r.assigned_tasks_count || 0}/${r.target_tasks})` : '';
+    ctx.fillText(`⚡${Math.round(r.battery)}% [${r.state}]${targetStr}`, 16, 62);
 
     texture.needsUpdate = true;
   }
@@ -650,6 +651,16 @@ class DigitalTwin3D {
 
   animate() {
     this.animId = requestAnimationFrame(() => this.animate());
+
+    // Continuously lerp all robot meshes towards their target positions and orientations at 60 FPS
+    for (const mesh of this.robotMeshes.values()) {
+      if (mesh.userData.targetPosition) {
+        mesh.position.lerp(mesh.userData.targetPosition, 0.18);
+      }
+      if (mesh.userData.targetRotationY !== undefined) {
+        mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, mesh.userData.targetRotationY, 0.18);
+      }
+    }
 
     // Interpolate camera towards target position if set
     if (this.targetCameraPos) {
