@@ -1,0 +1,19 @@
+{
+  "name": "warehouse",
+  "version": "1.0.0",
+  "description": "This project is a working software prototype for decentralized coordination of autonomous mobile robots in a smart warehouse. The goal is to simulate fleet behavior without a central controller, using peer-to-peer communication, local conflict detection, task negotiation, re-routing, and measured benchmarking.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}
