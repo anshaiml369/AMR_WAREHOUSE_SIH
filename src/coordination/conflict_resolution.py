@@ -98,8 +98,18 @@ class WaitForGraph:
         return [[u, v] for u, neighbors in sorted(self.edges.items()) for v in sorted(neighbors)]
 
 
+
+from src.coordination.priority import PriorityEvaluator, PriorityEvaluation
+
+
 class NegotiationProtocol:
     """Decentralized priority-bidding peer negotiation protocol."""
+
+    _evaluator: PriorityEvaluator = PriorityEvaluator()
+
+    @classmethod
+    def get_evaluator(cls) -> PriorityEvaluator:
+        return cls._evaluator
 
     @staticmethod
     def compute_priority_bid(carrying_package: bool, task_priority: int, battery: float, distance_to_goal: int = 0) -> float:
@@ -134,3 +144,13 @@ class NegotiationProtocol:
                 loser,
                 f"Tie-breaker: {winner} won contention against {loser}",
             )
+
+    @classmethod
+    def evaluate_and_negotiate(
+        cls,
+        eval_a: PriorityEvaluation,
+        eval_b: PriorityEvaluation,
+        robot_a_id: str,
+        robot_b_id: str,
+    ) -> tuple[str, str, str]:
+        return cls._evaluator.arbitrate_contention(eval_a, eval_b, robot_a_id, robot_b_id)

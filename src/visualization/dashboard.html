@@ -172,6 +172,99 @@
       color: #071015;
     }
 
+    /* 2D vs 3D Digital Twin Switcher */
+    .view-switch {
+      display: inline-flex;
+      background: #09171e;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .view-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 11px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .view-btn.active {
+      background: var(--cyan);
+      color: #071015;
+      box-shadow: 0 0 10px rgba(86, 214, 207, 0.4);
+    }
+    .cam-btn {
+      background: #142a34;
+      border: 1px solid #20404d;
+      color: var(--text);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .cam-btn:hover {
+      background: #20404d;
+      color: var(--cyan);
+    }
+    .cam-select, .op-select {
+      background: #071015;
+      border: 1px solid var(--line);
+      color: var(--text);
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    .op-btn {
+      background: #102630;
+      border: 1px solid #204554;
+      color: var(--text);
+      font-size: 11px;
+      padding: 5px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .op-btn:hover {
+      background: #204554;
+      color: var(--cyan);
+    }
+    .op-btn.warn {
+      border-color: rgba(239, 109, 109, 0.5);
+      color: #fca5a5;
+    }
+    .op-btn.warn:hover {
+      background: #ef4444;
+      color: #fff;
+    }
+
+    /* Escalation Banner */
+    .escalation-alert {
+      background: linear-gradient(90deg, rgba(239, 68, 68, 0.25), rgba(185, 28, 28, 0.15));
+      border: 1px solid var(--red);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 10px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #fecaca;
+    }
+    .incident-item {
+      background: #09171f;
+      border-left: 3px solid var(--amber);
+      padding: 7px 10px;
+      border-radius: 3px;
+      margin-bottom: 6px;
+      font-size: 11px;
+    }
+    .incident-item.critical { border-color: var(--red); }
+    .incident-item.resolved { border-color: var(--green); opacity: 0.75; }
+    .incident-item.escalated { border-color: var(--red); background: rgba(239, 68, 68, 0.12); }
+
     /* Edge Hardware Telemetry Ribbon */
     .telemetry-bar {
       display: flex;
@@ -767,11 +860,33 @@
     <!-- Workspace & Fleet Status -->
     <section class="workspace">
       <div class="panel">
-        <div class="panel-title">
-          <span>Warehouse Map / Active Decentralized State</span>
-          <span id="tick">T+000</span>
+        <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div style="display:flex; align-items:center; gap:12px;">
+            <span>Warehouse Fleet Digital State</span>
+            <div class="view-switch">
+              <button id="btnView2D" class="view-btn active" onclick="switchView('2d')">🔲 2D OPERATIONS</button>
+              <button id="btnView3D" class="view-btn" onclick="switchView('3d')">🧊 3D DIGITAL TWIN</button>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div id="cameraControls3D" style="display:none; gap:6px; align-items:center;">
+              <button id="btnCamReset" class="cam-btn" onclick="resetCamera3D()">RESET CAM</button>
+              <button id="btnCamTop" class="cam-btn" onclick="setCameraView3D('top')">TOP</button>
+              <button id="btnCamIso" class="cam-btn" onclick="setCameraView3D('iso')">ISO 45°</button>
+              <button id="btnCamFocusIncident" class="cam-btn" onclick="focusIncident3D()">FOCUS INCIDENT</button>
+              <select id="followAmrSelect" class="cam-select" onchange="followRobot3D(this.value)">
+                <option value="">FOLLOW: NONE</option>
+              </select>
+            </div>
+            <span id="tick">T+000</span>
+          </div>
         </div>
-        <div id="map"></div>
+
+        <div id="warehouseContainer" style="position:relative; width:100%;">
+          <div id="map"></div>
+          <div id="threeContainer" style="display:none; width:100%; height:620px; border-radius:6px; overflow:hidden; position:relative; background:#050d11; border:1px solid var(--line);"></div>
+        </div>
+
         <div class="legend">
           <span><i style="border-color:#56d6cf"></i>AMR</span>
           <span><i style="border-color:#f0b35b"></i>pickup</span>
@@ -790,7 +905,7 @@
       </aside>
     </section>
 
-    <!-- Lower Operational Grid: Decisions & Incident Center -->
+    <!-- Lower Operational Grid: Decisions, Incident Center, Operator Override & Priority Inspector -->
     <section class="lower-grid">
       <div class="panel">
         <div class="panel-title">
@@ -803,11 +918,40 @@
       </div>
       <div class="panel">
         <div class="panel-title">
-          <span>Fleet Incident & Recovery Center</span>
+          <span>Organizational Incident & Escalation Center</span>
           <span id="recoveryStatus" style="color:var(--green)">HEALTHY</span>
         </div>
+        <div id="escalationAlert" class="escalation-alert" style="display:none;"></div>
+        <div id="incidentList" class="incident-list" style="max-height:160px; overflow-y:auto; margin-bottom:8px;"></div>
         <div id="recoveryReport" style="font-size:11px; color:var(--muted); line-height:1.5;">
           No active incidents. Fleet operating autonomously in nominal state.
+        </div>
+
+        <div class="panel-title" style="margin-top:14px;">
+          <span>Operator Override Controls</span>
+          <span style="font-size:10px; color:var(--amber)">AUTHORITY: MANUAL OVERRIDE</span>
+        </div>
+        <div class="operator-toolbar" style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center;">
+          <select id="operatorRobotSelect" class="op-select"></select>
+          <button class="op-btn warn" onclick="operatorAction('pause_robot')">⏸ PAUSE AMR</button>
+          <button class="op-btn" onclick="operatorAction('resume_robot')">▶ RESUME AMR</button>
+          <input id="aisleCoordInput" placeholder="Cell e.g. 9,9" style="width:105px; background:#071015; border:1px solid var(--line); color:var(--text); padding:4px 8px; border-radius:4px; font-size:11px;" />
+          <button class="op-btn warn" onclick="operatorAction('close_aisle')">⛔ CLOSE AISLE</button>
+          <button class="op-btn" onclick="operatorAction('open_aisle')">✅ OPEN AISLE</button>
+        </div>
+
+        <div class="panel-title" style="margin-top:14px;">
+          <span>Priority Intelligence Policy (Explainable)</span>
+          <span style="font-size:10px; color:var(--cyan)">DETERMINISTIC FORMULA</span>
+        </div>
+        <div id="priorityWeightsHud" style="font-size:11px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; margin-top:4px;">
+          <span>Urgency: <strong style="color:var(--cyan)">+30</strong></span>
+          <span>SLA Risk: <strong style="color:var(--amber)">+25</strong></span>
+          <span>Cargo: <strong style="color:var(--cyan)">+40</strong></span>
+          <span>Pkg: <strong style="color:var(--cyan)">+20</strong></span>
+          <span>Battery: <strong style="color:var(--green)">+10</strong></span>
+          <span>Dist: <strong style="color:var(--red)">-0.5</strong></span>
+          <span>Congestion: <strong style="color:var(--red)">-5.0</strong></span>
         </div>
       </div>
     </section>
@@ -890,10 +1034,77 @@
     </div>
   </div>
 
+  <!-- Three.js 3D Digital Twin Import Map & Module -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/static/three/three.module.js",
+      "three/addons/": "/static/three/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="/static/digital_twin_3d.js"></script>
+
   <script>
     let socket;
     let showPaths = true;
+    let lastData = null;
+    let currentView = '2d';
     const $ = (id) => document.getElementById(id);
+
+    window.switchView = function(viewMode) {
+      currentView = viewMode;
+      if (viewMode === '3d') {
+        $('btnView2D').classList.remove('active');
+        $('btnView3D').classList.add('active');
+        $('map').style.display = 'none';
+        $('threeContainer').style.display = 'block';
+        $('cameraControls3D').style.display = 'flex';
+        if (!window.digitalTwin && window.DigitalTwin3D) {
+          window.digitalTwin = new window.DigitalTwin3D('threeContainer');
+          window.digitalTwin.init();
+          if (lastData) window.digitalTwin.update(lastData);
+        } else if (window.digitalTwin) {
+          window.digitalTwin.onResize();
+          if (lastData) window.digitalTwin.update(lastData);
+        }
+      } else {
+        $('btnView3D').classList.remove('active');
+        $('btnView2D').classList.add('active');
+        $('threeContainer').style.display = 'none';
+        $('cameraControls3D').style.display = 'none';
+        $('map').style.display = 'grid';
+      }
+    };
+
+    window.resetCamera3D = function() {
+      if (window.digitalTwin) window.digitalTwin.setIsometricCamera();
+    };
+    window.setCameraView3D = function(type) {
+      if (!window.digitalTwin) return;
+      if (type === 'top') window.digitalTwin.setTopCamera();
+      else window.digitalTwin.setIsometricCamera();
+    };
+    window.followRobot3D = function(robotId) {
+      if (window.digitalTwin) window.digitalTwin.followRobot(robotId);
+    };
+    window.focusIncident3D = function() {
+      if (window.digitalTwin) window.digitalTwin.focusIncident();
+    };
+
+    window.operatorAction = function(actionType) {
+      if (actionType === 'pause_robot' || actionType === 'resume_robot') {
+        const robotId = $('operatorRobotSelect').value;
+        if (!robotId) return alert('Select an AMR first');
+        send('operator_action', { op_type: actionType, robot_id: robotId, reason: 'Operator manual override' });
+      } else if (actionType === 'close_aisle' || actionType === 'open_aisle') {
+        const cellVal = $('aisleCoordInput').value.trim();
+        if (!cellVal) return alert('Enter cell coordinates e.g. 9,9');
+        const parts = cellVal.split(',').map(s => parseInt(s.trim(), 10));
+        if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return alert('Invalid coordinates format');
+        send('operator_action', { op_type: actionType, cell: parts, reason: 'Operator manual aisle control' });
+      }
+    };
 
     const eventText = (event) => {
       if (event.type === 'simulation_started') return 'simulation initialized';
@@ -942,6 +1153,11 @@
     }
 
     function draw(data) {
+      lastData = data;
+      if (window.digitalTwin) {
+        window.digitalTwin.update(data);
+      }
+
       $('connection').textContent = data.running ? 'SYSTEM ONLINE' : 'SYSTEM PAUSED';
       $('mode').textContent = data.running ? 'LIVE' : 'PAUSED';
       $('tick').textContent = `T+${String(data.timestamp).padStart(3, '0')}`;
@@ -1028,18 +1244,69 @@
         `;
       }
 
+      // Organizational Incidents & Escalation Center
+      if (data.incidents && $('incidentList')) {
+        if (data.incidents.length === 0) {
+          $('incidentList').innerHTML = '<span style="color:var(--muted); font-size:11px;">No active disruption incidents.</span>';
+        } else {
+          $('incidentList').innerHTML = data.incidents.slice(-5).reverse().map(inc => `
+            <div class="incident-item ${inc.severity.toLowerCase()} ${inc.status.toLowerCase()}">
+              <div style="display:flex; justify-content:space-between; font-weight:700;">
+                <span>${inc.id} [${inc.type}]</span>
+                <span style="color:${inc.status === 'RESOLVED' ? 'var(--green)' : inc.status === 'ESCALATED' ? 'var(--red)' : 'var(--amber)'}">● ${inc.status}</span>
+              </div>
+              <div style="color:var(--muted); margin-top:2px;">${inc.decision}</div>
+            </div>
+          `).join('');
+        }
+
+        const escalated = data.incidents.find(i => i.status === 'ESCALATED');
+        if (escalated && escalated.escalation_details && $('escalationAlert')) {
+          $('escalationAlert').style.display = 'block';
+          $('escalationAlert').innerHTML = `
+            <strong>🚨 HUMAN OPERATOR ESCALATION REQUIRED [${escalated.id}]</strong><br>
+            <strong>WHY:</strong> ${escalated.escalation_details.why}<br>
+            <strong>BLOCKED:</strong> ${escalated.escalation_details.blocked}<br>
+            <strong>ATTEMPTED:</strong> ${escalated.escalation_details.attempted_options}<br>
+            <strong>REQUIRED ACTION:</strong> ${escalated.escalation_details.human_action_required}
+          `;
+        } else if ($('escalationAlert')) {
+          $('escalationAlert').style.display = 'none';
+        }
+      }
+
+      // Populate Operator Robot Selection Dropdown
+      if (data.robots && $('operatorRobotSelect')) {
+        const currentSel = $('operatorRobotSelect').value;
+        if ($('operatorRobotSelect').options.length !== data.robots.length) {
+          $('operatorRobotSelect').innerHTML = data.robots.map(r => `
+            <option value="${r.robot_id}">${r.robot_id} (${r.state})</option>
+          `).join('');
+          if (currentSel) $('operatorRobotSelect').value = currentSel;
+        }
+      }
+
       // Benchmark summary if available
       if (data.benchmark_summary) {
         updateBenchmarkView(data.benchmark_summary);
       }
 
+      if (!data) return;
+      const wh = data.warehouse || {
+        width: (data.grid_size ? data.grid_size[0] : 18),
+        height: (data.grid_size ? data.grid_size[1] : 18),
+        obstacles: data.obstacles || [],
+        dynamic_obstacles: data.dynamic_blockages || [],
+        charging_stations: data.charging_stations || []
+      };
+
       const robots = data.robots || [];
       const tasks = data.tasks || [];
       const packages = data.packages || [];
-      const obstacles = new Set((data.warehouse.dynamic_obstacles || []).map(c => c.join(',')));
-      const staticObstacles = new Set((data.warehouse.obstacles || []).map(c => c.join(',')));
+      const obstacles = new Set((wh.dynamic_obstacles || []).map(c => c.join(',')));
+      const staticObstacles = new Set((wh.obstacles || []).map(c => c.join(',')));
       const reservations = new Set((data.reservations || []).map(r => r.cell.join(',')));
-      const chargingStations = new Set((data.warehouse.charging_stations || []).map(c => c.join(',')));
+      const chargingStations = new Set((wh.charging_stations || []).map(c => c.join(',')));
 
       const counts = data.task_counts || {};
       $('activeRobots').textContent = robots.filter(r => r.state !== 'IDLE' && !r.failed).length;
@@ -1054,8 +1321,8 @@
       // Map rendering
       const map = $('map');
       map.innerHTML = '';
-      for (let y = 0; y < data.warehouse.height; y++) {
-        for (let x = 0; x < data.warehouse.width; x++) {
+      for (let y = 0; y < wh.height; y++) {
+        for (let x = 0; x < wh.width; x++) {
           const cell = document.createElement('div');
           const key = `${x},${y}`;
           cell.className = 'cell' +

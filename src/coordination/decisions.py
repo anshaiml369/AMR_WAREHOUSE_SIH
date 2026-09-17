@@ -68,6 +68,29 @@ class DecisionLogger:
         self.records.append(record)
         return record
 
+    def log(
+        self,
+        decision_type: str = "AUTONOMOUS_DECISION",
+        category: str = "OPERATIONAL",
+        problem: str = "",
+        reason: str = "",
+        outcome: str = "",
+        timestamp: int = 0,
+        affected_robots: list[str] | None = None,
+        affected_tasks: list[str] | None = None,
+        action: str = "",
+    ) -> DecisionRecord:
+        return self.log_decision(
+            timestamp=timestamp,
+            category=category,
+            problem=problem,
+            decision=outcome or decision_type,
+            reason=reason,
+            participants=list(affected_robots or []),
+            action=action or outcome,
+            result=outcome or "Resolved successfully",
+        )
+
     def get_recent(self, limit: int = 20) -> list[dict[str, Any]]:
         return [r.to_dict() for r in self.records[-limit:]]
 

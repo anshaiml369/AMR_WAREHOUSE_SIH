@@ -15,6 +15,18 @@ from src.planning.congestion import CongestionTracker, CongestionReport
 from src.planning.reservation_table import ReservationTable
 from src.robots.amr import AMRRobot
 from src.simulation.scenarios import ScenarioRegistry
+from src.coordination.incidents import (
+    Incident,
+    IncidentManager,
+    IncidentSeverity,
+    IncidentStatus,
+)
+from src.coordination.priority import (
+    PriorityClass,
+    PriorityEvaluation,
+    PriorityEvaluator,
+    PriorityWeights,
+)
 from src.tasks.package import Package
 from src.tasks.task import Task
 from src.warehouse.warehouse import Warehouse
@@ -64,6 +76,9 @@ class BaseFleetSimulator:
         self.congestion_report = CongestionReport(score=0.0, level="LOW", bottlenecks=[], active_corridor_loads={})
         self.recovery_engine = FleetRecoveryEngine()
         self.scenario_registry = ScenarioRegistry()
+        self.priority_evaluator = PriorityEvaluator()
+        self.incident_manager = IncidentManager()
+        self.operator_actions: list[dict[str, Any]] = []
         self.active_scenario: dict[str, Any] | None = None
         self.network_degraded: bool = False
         self.edge_hardware: dict[str, Any] = {
@@ -152,13 +167,79 @@ class BaseFleetSimulator:
             if len(path) == 1 and robot.position != task.pickup:
                 continue
             distance = max(0, len(path) - 1)
-            score = distance + max(0.0, 100.0 - robot.battery) * 0.05 - task.priority * 0.1
-            reason = f"path={distance}; battery={robot.battery:.1f}; priority={task.priority}; feasible=true"
+            p_eval = self.priority_evaluator.evaluate(
+                robot_id=robot.robot_id,
+                carrying_package=bool(robot.carrying_package_id),
+                task_priority=task.priority,
+                battery=robot.battery,
+                time_step=self.time_step,
+                deadline=task.deadline,
+                remaining_distance=distance,
+                congestion_score=self.congestion_report.score,
+                is_emergency=bool(task.metadata.get("is_emergency")),
+            )
+            score = distance + max(0.0, 100.0 - robot.battery) * 0.05 - (p_eval.score * 0.1)
+            reason = f"score={score:.1f}; class={p_eval.priority_class.name}; path={distance}; battery={robot.battery:.1f}; priority={task.priority}; feasible=true; {p_eval.explanation}"
             candidates.append((score, robot.robot_id, reason))
         if not candidates:
+            if task.priority >= 5 or task.metadata.get("is_emergency"):
+                preempted = self._attempt_emergency_preemption(task)
+                if preempted:
+                    return preempted
             return None
         _, robot_id, reason = min(candidates)
         return robot_id, reason
+
+    def _attempt_emergency_preemption(self, emergency_task: Task) -> tuple[str, str] | None:
+        """
+        If an emergency order arrives and all operational robots are busy,
+        find an AMR assigned to a low-priority task that has not picked up cargo yet,
+        safely unassign the task back to queue, and assign the emergency task.
+        """
+        preemptable = []
+        for robot in self.robots.values():
+            if robot.failed or robot.state == "FAILED" or robot.battery < self.config.low_battery_threshold or robot.assigned_dock is not None:
+                continue
+            if robot.current_task and not robot.carrying_package_id:
+                incumbent = self.tasks.get(robot.current_task)
+                if incumbent and incumbent.priority <= 3:
+                    dist = self._distance_to_robot(robot.position, emergency_task.pickup)
+                    preemptable.append((incumbent.priority, dist, robot, incumbent))
+
+        if not preemptable:
+            return None
+
+        preemptable.sort(key=lambda x: (x[0], x[1]))
+        _, _, chosen_robot, old_task = preemptable[0]
+
+        old_task.assigned_robot = None
+        old_task.status = "pending"
+        old_task.reassignment_count += 1
+        old_task.metadata["preempted_by"] = emergency_task.task_id
+
+        self.decision_logger.log(
+            decision_type="EMERGENCY_PREEMPTION",
+            category="TASK_PREEMPTION",
+            problem=f"Priority-5 emergency order {emergency_task.task_id} arrived; all operational AMRs busy",
+            reason=f"Preempted non-critical task {old_task.task_id} (priority {old_task.priority}) from {chosen_robot.robot_id}",
+            outcome=f"{chosen_robot.robot_id} rerouted to express delivery; {old_task.task_id} re-queued",
+            timestamp=self.time_step,
+            affected_robots=[chosen_robot.robot_id],
+            affected_tasks=[emergency_task.task_id, old_task.task_id],
+        )
+
+        self.incident_manager.raise_incident(
+            incident_type="EMERGENCY_PREEMPTION",
+            severity=IncidentSeverity.HIGH,
+            timestamp=self.time_step,
+            affected_entities={"robots": [chosen_robot.robot_id], "tasks": [emergency_task.task_id, old_task.task_id]},
+            detected_by="PriorityDispatcher",
+            decision=f"Preempted task {old_task.task_id} for emergency order {emergency_task.task_id}",
+            action=f"Diverted {chosen_robot.robot_id} to express pickup",
+        )
+
+        reason = f"PREEMPTION: Diverted from {old_task.task_id} (pri {old_task.priority}) to express task {emergency_task.task_id} (pri {emergency_task.priority}); feasible=true"
+        return chosen_robot.robot_id, reason
 
     def _next_goal(self, robot: AMRRobot) -> tuple[int, int] | None:
         if not robot.current_task or robot.current_task not in self.tasks:
@@ -591,6 +672,8 @@ class BaseFleetSimulator:
             [r.current_path for r in self.robots.values() if r.current_path],
         )
 
+        self._check_escalation_rules()
+
         if self.demo_mode:
             self._update_demo_tour_step()
 
@@ -603,19 +686,46 @@ class BaseFleetSimulator:
             self.metrics.deadlocks += 1
             cycle_robots = [self.robots[rid] for rid in cycle[:-1] if rid in self.robots]
             if cycle_robots:
-                def robot_score(r):
+                scored = []
+                for r in cycle_robots:
                     t = self.tasks.get(r.current_task) if r.current_task else None
-                    return NegotiationProtocol.compute_priority_bid(bool(r.carrying_package_id), t.priority if t else 1, r.battery, len(r.current_path))
-                conceding_robot = min(cycle_robots, key=robot_score)
+                    p_eval = self.priority_evaluator.evaluate(
+                        robot_id=r.robot_id,
+                        carrying_package=bool(r.carrying_package_id),
+                        task_priority=t.priority if t else 1,
+                        battery=r.battery,
+                        time_step=self.time_step,
+                        deadline=t.deadline if t else None,
+                        remaining_distance=len(r.current_path),
+                        congestion_score=self.congestion_report.score,
+                    )
+                    scored.append((p_eval.score, p_eval, r))
+
+                scored.sort(key=lambda item: item[0])
+                min_score, min_eval, conceding_robot = scored[0]
+
                 conceding_robot.state = "REROUTING"
                 conceding_robot.current_path = []
                 conceding_robot.waiting_time = 0
                 self.metrics.replanning_events += 1
+
+                scores_detail = ", ".join(f"{r.robot_id}: {s:.1f} ({ev.priority_class.name})" for s, ev, r in scored)
+                self.decision_logger.log(
+                    decision_type="DEADLOCK_CYCLE_BREAK",
+                    category="DEADLOCK_ARBITRATION",
+                    problem=f"Directed WFG cycle: {' -> '.join(cycle)} [{scores_detail}]",
+                    reason=f"{conceding_robot.robot_id} yielded (lowest operational score {min_score:.1f} in cycle)",
+                    outcome=f"{conceding_robot.robot_id} evacuated corridor into buffer cell",
+                    timestamp=self.time_step,
+                    affected_robots=[r.robot_id for r in cycle_robots],
+                )
+
                 self.metrics.record_event({
                     "type": "deadlock_cycle_broken",
                     "cycle": cycle,
                     "broken_by": conceding_robot.robot_id,
-                    "method": "wfg_cycle_resolution",
+                    "priority_score": min_score,
+                    "method": "priority_wfg_cycle_resolution",
                     "time": self.time_step,
                 })
         return cycles
@@ -741,6 +851,149 @@ class BaseFleetSimulator:
             self.step()
         return self.metrics.as_dict()
 
+    def _check_escalation_rules(self) -> None:
+        """
+        Checks if autonomous operational states exceed safety thresholds or mathematical SLA bounds,
+        and automatically raises/escalates incidents with transparent explanations.
+        """
+        for robot in self.robots.values():
+            if robot.battery < 15.0 and not robot.state.startswith("DOCK"):
+                free_docks = [d for d in self.warehouse.charging_stations if self.warehouse.is_walkable(d)]
+                if not free_docks:
+                    existing = [
+                        i for i in self.incident_manager.get_active()
+                        if i.incident_type == "BATTERY_STARVATION" and robot.robot_id in i.affected_entities.get("robots", [])
+                    ]
+                    if not existing:
+                        inc = self.incident_manager.raise_incident(
+                            incident_type="BATTERY_STARVATION",
+                            severity=IncidentSeverity.CRITICAL,
+                            timestamp=self.time_step,
+                            affected_entities={"robots": [robot.robot_id]},
+                            detected_by="BatterySafetyGovernor",
+                            decision="Charging infrastructure unreachable or offline",
+                            action="Requesting immediate human intervention",
+                        )
+                        self.incident_manager.escalate(
+                            incident_id=inc.id,
+                            why=f"AMR {robot.robot_id} battery at {robot.battery:.1f}%; 0 accessible charging docks",
+                            blocked=f"Robot {robot.robot_id} stranded at ({robot.position[0]},{robot.position[1]})",
+                            attempted_options="Evaluated primary and secondary charging bays; all obstructed or offline",
+                            human_action_required="Deploy mobile charger or clear bay access immediately",
+                        )
+
+        for task in self.tasks.values():
+            if task.status == "in_progress" and task.assigned_robot in self.robots and not task.sla_violated:
+                if task.deadline and self.time_step > task.deadline + 15:
+                    task.sla_violated = True
+                    existing = [
+                        i for i in self.incident_manager.get_active()
+                        if i.incident_type == "SLA_VIOLATION" and task.task_id in i.affected_entities.get("tasks", [])
+                    ]
+                    if not existing:
+                        self.incident_manager.raise_incident(
+                            incident_type="SLA_VIOLATION",
+                            severity=IncidentSeverity.HIGH,
+                            timestamp=self.time_step,
+                            affected_entities={"tasks": [task.task_id]},
+                            detected_by="SLAMonitor",
+                            decision="Delivery deadline exceeded by >15 ticks",
+                            action="Flagged for warehouse management review",
+                        )
+
+    def operator_pause_robot(self, robot_id: str, reason: str = "Operator manual pause") -> bool:
+        robot = self.robots.get(robot_id)
+        if not robot:
+            return False
+        prev = robot.state
+        robot.state = "PAUSED"
+        action = {
+            "timestamp": self.time_step,
+            "action": "pause_robot",
+            "target": robot_id,
+            "previous_state": prev,
+            "new_state": "PAUSED",
+            "reason": reason,
+            "authority": "OPERATOR_OVERRIDE",
+        }
+        self.operator_actions.append(action)
+        self.decision_logger.log(
+            decision_type="OPERATOR_OVERRIDE",
+            category="OPERATOR_ACTION",
+            problem=f"Manual operator intervention on {robot_id}",
+            reason=reason,
+            outcome=f"Robot {robot_id} state forced to PAUSED",
+            timestamp=self.time_step,
+            affected_robots=[robot_id],
+        )
+        return True
+
+    def operator_resume_robot(self, robot_id: str, reason: str = "Operator manual resume") -> bool:
+        robot = self.robots.get(robot_id)
+        if not robot:
+            return False
+        prev = robot.state
+        robot.state = "IDLE" if not robot.current_task else "MOVING"
+        action = {
+            "timestamp": self.time_step,
+            "action": "resume_robot",
+            "target": robot_id,
+            "previous_state": prev,
+            "new_state": robot.state,
+            "reason": reason,
+            "authority": "OPERATOR_OVERRIDE",
+        }
+        self.operator_actions.append(action)
+        return True
+
+    def operator_close_aisle(self, cell: tuple[int, int], reason: str = "Manual cordon") -> bool:
+        if not self.warehouse.is_walkable(cell):
+            return False
+        self.warehouse.add_dynamic_obstacle(cell)
+        if cell not in self.dynamic_blockages:
+            self.dynamic_blockages.append(cell)
+        self.reservation_table.invalidate_cell(cell, 0, 1000)
+        action = {
+            "timestamp": self.time_step,
+            "action": "close_aisle",
+            "target": f"({cell[0]},{cell[1]})",
+            "previous_state": "WALKABLE",
+            "new_state": "OBSTACLE",
+            "reason": reason,
+            "authority": "OPERATOR_OVERRIDE",
+        }
+        self.operator_actions.append(action)
+        self.incident_manager.raise_incident(
+            incident_type="AISLE_CLOSURE",
+            severity=IncidentSeverity.MEDIUM,
+            timestamp=self.time_step,
+            affected_entities={"cells": [f"({cell[0]},{cell[1]})"]},
+            detected_by="OperatorAction",
+            decision="Corridor closed manually by operator",
+            action=f"Obstacle placed at {cell}; paths rerouted",
+        )
+        return True
+
+    def operator_open_aisle(self, cell: tuple[int, int], reason: str = "Aisle cleared") -> bool:
+        if cell in self.warehouse.dynamic_obstacles:
+            self.warehouse.dynamic_obstacles.discard(cell)
+            self.warehouse._set_cell(cell, 0)
+            self.reservation_table.clear_cell(cell)
+            if cell in self.dynamic_blockages:
+                self.dynamic_blockages.remove(cell)
+            action = {
+                "timestamp": self.time_step,
+                "action": "open_aisle",
+                "target": f"({cell[0]},{cell[1]})",
+                "previous_state": "OBSTACLE",
+                "new_state": "WALKABLE",
+                "reason": reason,
+                "authority": "OPERATOR_OVERRIDE",
+            }
+            self.operator_actions.append(action)
+            return True
+        return False
+
     def build_dashboard_payload(self) -> dict[str, Any]:
         sla_total = len(self.tasks)
         completed_tasks = [t for t in self.tasks.values() if t.status == "completed"]
@@ -753,13 +1006,15 @@ class BaseFleetSimulator:
         edge_hardware = {
             "avg_cpu_percent": fleet_cpu,
             "avg_ram_gb": fleet_ram,
-            "ping_ms": 8.2 if not self.network_degraded else 200.0,
-            "bandwidth_mbps": 124.5 if not self.network_degraded else 18.5,
+            "ping_ms": 8.2 if not self.network_degraded else 214.5,
+            "bandwidth_mbps": 124.5 if not self.network_degraded else 18.2,
             "dataset_reference": "Simulated Edge Telemetry — DEDICAT6G Reference",
-            "status": "NOMINAL - EDGE TELEMETRY ACTIVE" if not self.network_degraded else "DEGRADED - CONSERVATIVE HORIZON",
+            "status": "NOMINAL - EDGE TELEMETRY ACTIVE" if not self.network_degraded else "DEGRADED - VELOCITY THROTTLED",
         }
+
         return {
             "timestamp": self.time_step,
+            "time_step": self.time_step,
             "warehouse": {
                 "width": self.warehouse.width,
                 "height": self.warehouse.height,
@@ -767,6 +1022,10 @@ class BaseFleetSimulator:
                 "dynamic_obstacles": [list(cell) for cell in sorted(self.warehouse.dynamic_obstacles)],
                 "charging_stations": [list(cell) for cell in sorted(self.warehouse.charging_stations)],
             },
+            "grid_size": [self.warehouse.width, self.warehouse.height],
+            "obstacles": [list(cell) for cell in self.warehouse.obstacles],
+            "charging_stations": [list(cell) for cell in self.warehouse.charging_stations],
+            "dynamic_blockages": [list(cell) for cell in self.dynamic_blockages],
             "continuous_dispatch": self.continuous_dispatch,
             "robots": [r.to_dict() for r in self.robots.values()],
             "tasks": [t.to_dict() for t in self.tasks.values()],
@@ -801,6 +1060,18 @@ class BaseFleetSimulator:
             "recovery_history": [r.to_dict() for r in self.recovery_engine.recovery_history[-5:]],
             "active_scenario": self.active_scenario,
             "scenarios": self.scenario_registry.list_scenarios(),
+            "incidents": self.incident_manager.to_list(),
+            "operator_actions": self.operator_actions[-15:],
+            "priority_weights": {
+                "urgency": self.priority_evaluator.weights.w_urgency,
+                "sla_risk": self.priority_evaluator.weights.w_sla_risk,
+                "pkg_importance": self.priority_evaluator.weights.w_pkg_importance,
+                "carrying": self.priority_evaluator.weights.w_carrying,
+                "progress": self.priority_evaluator.weights.w_progress,
+                "battery": self.priority_evaluator.weights.w_battery,
+                "distance": self.priority_evaluator.weights.w_distance,
+                "congestion": self.priority_evaluator.weights.w_congestion,
+            },
             "demo_tour": {
                 "active": self.demo_mode,
                 "stage": self.demo_stage,

@@ -64,3 +64,13 @@ class ReservationTable:
     def clear(self):
         self._vertex.clear()
         self._edge.clear()
+
+    def invalidate_cell(self, cell: tuple[int, int], start_time: int = 0, end_time: int = 1000) -> None:
+        current = self._vertex.get(cell, {})
+        for t in range(start_time, end_time + 1):
+            current[t] = "BLOCKED"
+        self._vertex[cell] = current
+
+    def clear_cell(self, cell: tuple[int, int]) -> None:
+        if cell in self._vertex:
+            del self._vertex[cell]

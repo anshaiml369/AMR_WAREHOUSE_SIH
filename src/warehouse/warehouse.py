@@ -25,6 +25,10 @@ class Warehouse:
             self._set_cell(cell, 2)
 
     @property
+    def obstacles(self) -> set[tuple[int, int]]:
+        return self.static_obstacles | self.dynamic_obstacles
+
+    @property
     def bounds(self) -> tuple[int, int]:
         return self.width, self.height
 

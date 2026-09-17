@@ -174,6 +174,91 @@ def export_simulation_to_excel(sim: "BaseFleetSimulator") -> bytes:
         "0 (Resolved)",
     ])
 
+    # -------------------------------------------------------------
+    # 7. Sheet: Priority Decisions
+    # -------------------------------------------------------------
+    ws_pri = wb.create_sheet(title="Priority Decisions")
+    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]:
+        ws_pri.column_dimensions[col].width = 16
+    ws_pri.column_dimensions["L"].width = 45
+    style_table(ws_pri, ["Task ID", "Assigned AMR", "Priority Class", "Priority Score", "Urgency", "SLA Risk", "Carrying", "Battery Safety", "Distance Cost", "Congestion Cost", "Decision Outcome", "Explanation"])
+
+    for t in sim.tasks.values():
+        assigned_robot = sim.robots.get(t.assigned_robot) if t.assigned_robot else None
+        p_eval = sim.priority_evaluator.evaluate(
+            robot_id=t.assigned_robot or "AMR-TBD",
+            carrying_package=bool(assigned_robot and assigned_robot.carrying_package_id),
+            task_priority=t.priority,
+            battery=assigned_robot.battery if assigned_robot else 100.0,
+            time_step=sim.time_step,
+            deadline=t.deadline,
+            remaining_distance=len(assigned_robot.current_path) if assigned_robot else 0,
+            congestion_score=sim.congestion_report.score,
+            is_emergency=bool(t.metadata.get("is_emergency")),
+        )
+        ws_pri.append([
+            t.task_id,
+            t.assigned_robot or "PENDING",
+            p_eval.priority_class.name,
+            p_eval.score,
+            round(p_eval.factors.get("urgency", 0.0), 1),
+            round(p_eval.factors.get("sla_risk", 0.0), 1),
+            round(p_eval.factors.get("carrying_status", 0.0), 1),
+            round(p_eval.factors.get("battery_safety", 0.0), 1),
+            round(p_eval.factors.get("distance_cost", 0.0), 1),
+            round(p_eval.factors.get("congestion_cost", 0.0), 1),
+            t.status.upper(),
+            p_eval.explanation,
+        ])
+
+    # -------------------------------------------------------------
+    # 8. Sheet: Incidents & Escalations
+    # -------------------------------------------------------------
+    ws_inc = wb.create_sheet(title="Incidents")
+    for col in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"]:
+        ws_inc.column_dimensions[col].width = 16
+    ws_inc.column_dimensions["E"].width = 24
+    ws_inc.column_dimensions["I"].width = 30
+    ws_inc.column_dimensions["J"].width = 35
+    style_table(ws_inc, ["Incident ID", "Tick", "Type", "Severity", "Affected Entities", "Detected By", "Status", "Decision", "Action", "Escalation Details", "Resolution Tick"])
+
+    for inc in sim.incident_manager.get_all():
+        entities_str = "; ".join(f"{k}: {','.join(v)}" for k, v in inc.affected_entities.items())
+        esc_str = f"WHY: {inc.escalation_details.get('why', '')} | ACTION: {inc.escalation_details.get('human_action_required', '')}" if inc.escalation_details else "None"
+        ws_inc.append([
+            inc.id,
+            inc.timestamp,
+            inc.incident_type,
+            inc.severity.value,
+            entities_str,
+            inc.detected_by,
+            inc.status.value,
+            inc.decision,
+            inc.action,
+            esc_str,
+            inc.resolution_time if inc.resolution_time is not None else "Active",
+        ])
+
+    # -------------------------------------------------------------
+    # 9. Sheet: Operator Actions
+    # -------------------------------------------------------------
+    ws_op = wb.create_sheet(title="Operator Actions")
+    for col in ["A", "B", "C", "D", "E", "F", "G"]:
+        ws_op.column_dimensions[col].width = 18
+    ws_op.column_dimensions["F"].width = 35
+    style_table(ws_op, ["Timestamp", "Action", "Target", "Previous State", "New State", "Reason", "Authority"])
+
+    for op in sim.operator_actions:
+        ws_op.append([
+            op.get("timestamp", 0),
+            op.get("action", ""),
+            op.get("target", ""),
+            op.get("previous_state", ""),
+            op.get("new_state", ""),
+            op.get("reason", ""),
+            op.get("authority", "OPERATOR_OVERRIDE"),
+        ])
+
     # Apply light styling to all cells
     for ws in wb.worksheets:
         for row in ws.iter_rows(min_row=2):

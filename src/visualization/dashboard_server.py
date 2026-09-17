@@ -139,6 +139,19 @@ class LiveDashboard:
                     self.simulator.metrics.record_event({"type": "amr_failed", "robot": robot.robot_id, "time": self.simulator.time_step})
             elif action == "inject_emergency_task":
                 self.simulator.scenario_registry.execute("emergency_task", self.simulator)
+            elif action == "operator_action":
+                op_type = message.get("op_type", "")
+                robot_id = message.get("robot_id", "")
+                cell = message.get("cell")
+                reason = message.get("reason", "Operator manual override")
+                if op_type == "pause_robot" and robot_id:
+                    self.simulator.operator_pause_robot(robot_id, reason)
+                elif op_type == "resume_robot" and robot_id:
+                    self.simulator.operator_resume_robot(robot_id, reason)
+                elif op_type == "close_aisle" and cell:
+                    self.simulator.operator_close_aisle((int(cell[0]), int(cell[1])), reason)
+                elif op_type == "open_aisle" and cell:
+                    self.simulator.operator_open_aisle((int(cell[0]), int(cell[1])), reason)
 
     def tick(self) -> None:
         with self.lock:
@@ -209,7 +222,53 @@ def run_benchmark_route(seed_count: int = 10, robot_count: int = 5, task_count: 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith("/api/export/excel"):
+        if self.path.startswith("/static/"):
+            rel_path = self.path[len("/static/"):].split("?")[0]
+            static_file = (ROOT / "static" / rel_path).resolve()
+            if static_file.is_file() and str(static_file).startswith(str((ROOT / "static").resolve())):
+                content_type = "application/octet-stream"
+                if static_file.suffix in {".js", ".mjs"}:
+                    content_type = "application/javascript; charset=utf-8"
+                elif static_file.suffix == ".css":
+                    content_type = "text/css; charset=utf-8"
+                elif static_file.suffix == ".json":
+                    content_type = "application/json"
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
+                self.wfile.write(static_file.read_bytes())
+                return
+            self.send_response(404)
+            self.end_headers()
+            return
+        if self.path.startswith("/api/operator/action"):
+            query = parse_qs(urlsplit(self.path).query)
+            action_type = query.get("action", [""])[0]
+            robot_id = query.get("robot_id", [""])[0]
+            cell_str = query.get("cell", [""])[0]
+            reason = query.get("reason", ["Operator manual action"])[0]
+            res = False
+            with LIVE.lock:
+                if action_type == "pause_robot" and robot_id:
+                    res = LIVE.simulator.operator_pause_robot(robot_id, reason)
+                elif action_type == "resume_robot" and robot_id:
+                    res = LIVE.simulator.operator_resume_robot(robot_id, reason)
+                elif action_type == "close_aisle" and cell_str:
+                    parts = [int(p.strip()) for p in cell_str.split(",")]
+                    if len(parts) == 2:
+                        res = LIVE.simulator.operator_close_aisle((parts[0], parts[1]), reason)
+                elif action_type == "open_aisle" and cell_str:
+                    parts = [int(p.strip()) for p in cell_str.split(",")]
+                    if len(parts) == 2:
+                        res = LIVE.simulator.operator_open_aisle((parts[0], parts[1]), reason)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
+            return
+        if self.path.startswith("/api/export/excel") or self.path.startswith("/api/report/export"):
             from src.reporting.excel_export import export_simulation_to_excel
             with LIVE.lock:
                 excel_bytes = export_simulation_to_excel(LIVE.simulator)
@@ -283,6 +342,47 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.wfile.write(content.encode("utf-8"))
             return
         super().do_GET()
+
+    def do_POST(self):
+        if self.path.startswith("/api/operator/action"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            action_type = data.get("action", "")
+            robot_id = data.get("robot_id", "")
+            cell = data.get("cell")
+            reason = data.get("reason", "Operator manual action")
+            res = False
+            with LIVE.lock:
+                if action_type == "pause_robot" and robot_id:
+                    res = LIVE.simulator.operator_pause_robot(robot_id, reason)
+                elif action_type == "resume_robot" and robot_id:
+                    res = LIVE.simulator.operator_resume_robot(robot_id, reason)
+                elif action_type == "close_aisle" and cell:
+                    if isinstance(cell, (list, tuple)) and len(cell) == 2:
+                        res = LIVE.simulator.operator_close_aisle((int(cell[0]), int(cell[1])), reason)
+                    elif isinstance(cell, str):
+                        parts = [int(p.strip()) for p in cell.split(",")]
+                        if len(parts) == 2:
+                            res = LIVE.simulator.operator_close_aisle((parts[0], parts[1]), reason)
+                elif action_type == "open_aisle" and cell:
+                    if isinstance(cell, (list, tuple)) and len(cell) == 2:
+                        res = LIVE.simulator.operator_open_aisle((int(cell[0]), int(cell[1])), reason)
+                    elif isinstance(cell, str):
+                        parts = [int(p.strip()) for p in cell.split(",")]
+                        if len(parts) == 2:
+                            res = LIVE.simulator.operator_open_aisle((parts[0], parts[1]), reason)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
+            return
+        self.send_response(404)
+        self.end_headers()
 
     def log_message(self, format: str, *args):
         return
