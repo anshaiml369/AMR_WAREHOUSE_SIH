@@ -74,6 +74,8 @@ class BaseFleetSimulator:
         self.peer_knowledge: dict[str, dict[str, dict[str, Any]]] = {}
         self.wait_for_graph = WaitForGraph()
         self.active_deadlock_cycles: list[list[str]] = []
+        self.charging_queue: list[str] = []
+        self.charging_reservations: dict[tuple[int, int], str] = {}
         
         # Lifecycle State Machine
         self.simulation_status: str = "READY"  # IDLE, READY, RUNNING, PAUSED, COMPLETED
@@ -562,6 +564,8 @@ class BaseFleetSimulator:
         self.dynamic_blockages.clear()
         self.wait_for_graph = WaitForGraph()
         self.active_deadlock_cycles = []
+        self.charging_queue.clear()
+        self.charging_reservations.clear()
         
         # Lifecycle state: READY with no active execution
         self.simulation_status = "READY"
@@ -848,10 +852,12 @@ class BaseFleetSimulator:
         if not self.warehouse.charging_stations:
             robot.state = "CHARGING"
             return
+
         occupied_docks = {r.assigned_dock for r in self.robots.values() if r.robot_id != robot.robot_id and r.assigned_dock}
-        occupied_docks.update(r.position for r in self.robots.values() if r.robot_id != robot.robot_id and r.position in self.warehouse.charging_stations)
+        occupied_docks.update(r.position for r in self.robots.values() if r.robot_id != robot.robot_id and r.position in self.warehouse.charging_stations and (r.state in {"CHARGING", "DOCKED_CHARGING"} or r.assigned_dock == r.position))
+        occupied_docks.update(dock for dock, res_rid in self.charging_reservations.items() if res_rid != robot.robot_id)
+
         free_docks = [dock for dock in self.warehouse.charging_stations if dock not in occupied_docks and self.warehouse.is_walkable(dock)]
-        target_dock = min(free_docks or list(self.warehouse.charging_stations), key=lambda d: self._distance_to_robot(robot.position, d))
 
         if robot.current_task and robot.carrying_package_id is None:
             task = self.tasks[robot.current_task]
@@ -863,11 +869,77 @@ class BaseFleetSimulator:
             robot.current_goal = None
             robot.current_path = []
 
-        robot.assigned_dock = target_dock
-        robot.state = "RETURNING_TO_CHARGE"
-        robot.current_goal = target_dock
-        self._plan_path_for_robot(robot)
-        self.metrics.record_event({"type": "dispatched_to_dock", "robot": robot.robot_id, "dock": list(target_dock), "time": self.time_step})
+        if free_docks:
+            target_dock = min(free_docks, key=lambda d: self._distance_to_robot(robot.position, d))
+            self.charging_reservations[target_dock] = robot.robot_id
+            if robot.robot_id in self.charging_queue:
+                self.charging_queue.remove(robot.robot_id)
+
+            robot.assigned_dock = target_dock
+            robot.state = "RETURNING_TO_CHARGE"
+            robot.current_goal = target_dock
+            self._plan_path_for_robot(robot)
+            self.metrics.record_event({"type": "dispatched_to_dock", "robot": robot.robot_id, "dock": list(target_dock), "time": self.time_step})
+        else:
+            target_dock = min(list(self.warehouse.charging_stations), key=lambda d: self._distance_to_robot(robot.position, d))
+            if robot.robot_id not in self.charging_queue:
+                self.charging_queue.append(robot.robot_id)
+            self.charging_queue.sort(key=lambda rid: (self.robots[rid].battery, -self.robots[rid].assigned_tasks_count) if rid in self.robots else (100.0, 0))
+            rank = self.charging_queue.index(robot.robot_id) + 1
+            robot.assigned_dock = target_dock
+            robot.state = "RETURNING_TO_CHARGE"
+            robot.current_goal = target_dock
+            self._plan_path_for_robot(robot)
+            self.metrics.record_event({
+                "type": "charging_queued",
+                "robot": robot.robot_id,
+                "battery": round(robot.battery, 1),
+                "queue_rank": rank,
+                "time": self.time_step,
+            })
+
+    def get_charging_status(self) -> dict[str, Any]:
+        stations_info = []
+        occupied_docks: dict[tuple[int, int], str] = {}
+        for r in self.robots.values():
+            if r.position in self.warehouse.charging_stations and (r.state in {"CHARGING", "DOCKED_CHARGING"} or r.assigned_dock == r.position):
+                occupied_docks[r.position] = r.robot_id
+        for dock, rid in self.charging_reservations.items():
+            if dock not in occupied_docks:
+                occupied_docks[dock] = rid
+
+        for station in sorted(self.warehouse.charging_stations):
+            occupant = occupied_docks.get(station)
+            reserved_by = self.charging_reservations.get(station)
+            est_wait = 0.0
+            if occupant and occupant in self.robots:
+                occ_r = self.robots[occupant]
+                needed = max(0.0, self.config.charge_recovery_threshold - occ_r.battery)
+                est_wait = round(needed / 4.0, 1)
+            stations_info.append({
+                "station": list(station),
+                "is_occupied": occupant is not None,
+                "occupant": occupant,
+                "reserved_by": reserved_by,
+                "estimated_wait_ticks": est_wait,
+            })
+
+        return {
+            "total_stations": len(self.warehouse.charging_stations),
+            "occupied_stations": len(occupied_docks),
+            "available_stations": max(0, len(self.warehouse.charging_stations) - len(occupied_docks)),
+            "queue_length": len(self.charging_queue),
+            "queue": [
+                {
+                    "rank": idx + 1,
+                    "robot_id": rid,
+                    "battery": round(self.robots[rid].battery, 1) if rid in self.robots else 0.0,
+                    "pending_tasks": self.robots[rid].assigned_tasks_count if rid in self.robots else 0,
+                }
+                for idx, rid in enumerate(self.charging_queue)
+            ],
+            "stations": stations_info,
+        }
 
     def _replenish_continuous_tasks(self, count: int = 3) -> None:
         pickup_candidates = [(2, 3), (3, 5), (4, 7), (6, 5), (7, 8), (8, 11), (3, 12), (7, 13), (12, 4), (13, 7)]
@@ -952,9 +1024,21 @@ class BaseFleetSimulator:
                 robot.battery = min(robot.max_battery, robot.battery + 4.0)
                 if robot.battery >= self.config.charge_recovery_threshold:
                     robot.battery = min(robot.max_battery, robot.battery)
+                    dock = robot.assigned_dock or (robot.position if robot.position in self.warehouse.charging_stations else None)
+                    if dock and dock in self.charging_reservations:
+                        del self.charging_reservations[dock]
                     robot.state = "IDLE"
                     robot.assigned_dock = None
                     self.metrics.record_event({"type": "robot_charge_complete", "robot": robot.robot_id, "battery": round(robot.battery, 1), "time": self.time_step})
+
+                    if self.charging_queue:
+                        next_rid = self.charging_queue.pop(0)
+                        if next_rid in self.robots:
+                            self._send_to_charge(self.robots[next_rid])
+
+                    has_next = self._activate_next_assigned_task(robot)
+                    if not has_next and self.task_execution_active:
+                        self._assign_unassigned_tasks()
                 continue
 
             if robot.state == "RETURNING_TO_CHARGE":
@@ -973,9 +1057,11 @@ class BaseFleetSimulator:
                             robot.state = "CHARGING"
                             robot.current_path = []
                             self.metrics.record_event({"type": "robot_docked", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
+                        else:
+                            robot.state = "RETURNING_TO_CHARGE"
                 continue
 
-            if (robot.battery < self.config.low_battery_threshold and robot.carrying_package_id is None) or robot.battery <= 0.0:
+            if robot.state not in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} and robot.robot_id not in self.charging_queue and (((robot.battery < self.config.low_battery_threshold and robot.carrying_package_id is None) or robot.battery <= 0.0)):
                 if self.warehouse.charging_stations:
                     self._send_to_charge(robot)
                     continue
@@ -2103,6 +2189,7 @@ class BaseFleetSimulator:
             "grid_size": [self.warehouse.width, self.warehouse.height],
             "obstacles": [list(cell) for cell in self.warehouse.obstacles],
             "charging_stations": [list(cell) for cell in self.warehouse.charging_stations],
+            "charging_management": self.get_charging_status(),
             "racks": [rack.to_dict() for rack in self.warehouse.racks.values()],
             "dynamic_blockages": [list(cell) for cell in self.dynamic_blockages],
             "continuous_dispatch": self.continuous_dispatch,
