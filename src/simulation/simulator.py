@@ -138,6 +138,14 @@ class BaseFleetSimulator:
             task.package_id = f"PKG-{task.task_id}"
         if task.package_id not in self.packages:
             self.packages[task.package_id] = Package(task.package_id, task.pickup, task.destination, task.task_id)
+        self.metrics.record_event({
+            "type": "task_created",
+            "event": "TASK_CREATED",
+            "task": task.task_id,
+            "task_id": task.task_id,
+            "priority": task.priority,
+            "time": self.time_step,
+        })
 
     def _get_fleet_home_positions(self, count: int) -> list[tuple[int, int]]:
         positions: list[tuple[int, int]] = []
@@ -262,7 +270,8 @@ class BaseFleetSimulator:
             next_t.status = "in_progress"
             next_t.started_at = self.time_step
             self._plan_path_for_robot(robot)
-            self.metrics.record_event({"type": "task_assigned", "task": next_t.task_id, "robot": robot.robot_id, "reason": "next_in_queue", "time": self.time_step})
+            self.metrics.record_event({"type": "task_assigned", "event": "TASK_ASSIGNED", "task": next_t.task_id, "robot": robot.robot_id, "reason": "next_in_queue", "time": self.time_step})
+            self.metrics.record_event({"type": "task_started", "event": "TASK_STARTED", "task": next_t.task_id, "robot": robot.robot_id, "time": self.time_step})
             return True
         return False
 
@@ -287,7 +296,8 @@ class BaseFleetSimulator:
             task.started_at = self.time_step
             task.allocation_reason = allocation_reason
             self._plan_path_for_robot(self.robots[robot_id])
-            self.metrics.record_event({"type": "task_assigned", "task": task_id, "robot": robot_id, "reason": task.allocation_reason, "time": self.time_step})
+            self.metrics.record_event({"type": "task_assigned", "event": "TASK_ASSIGNED", "task": task_id, "robot": robot_id, "reason": task.allocation_reason, "time": self.time_step})
+            self.metrics.record_event({"type": "task_started", "event": "TASK_STARTED", "task": task_id, "robot": robot_id, "time": self.time_step})
 
     def _distance_to_robot(self, position: tuple[int, int], target: tuple[int, int]) -> int:
         return abs(position[0] - target[0]) + abs(position[1] - target[1])
@@ -545,6 +555,7 @@ class BaseFleetSimulator:
             else:
                 if robot.state not in {"FAILED", "PAUSED"}:
                     robot.state = "TEMPORARILY_BLOCKED"
+                    self.metrics.record_event({"type": "amr_blocked", "event": "AMR_BLOCKED", "robot": robot.robot_id, "time": self.time_step})
         else:
             if robot.state in {"TEMPORARILY_BLOCKED", "NO_FEASIBLE_ROUTE"}:
                 robot.replanning_retries = 0
@@ -883,7 +894,7 @@ class BaseFleetSimulator:
             robot.state = "RETURNING_TO_CHARGE"
             robot.current_goal = target_dock
             self._plan_path_for_robot(robot)
-            self.metrics.record_event({"type": "dispatched_to_dock", "robot": robot.robot_id, "dock": list(target_dock), "time": self.time_step})
+            self.metrics.record_event({"type": "dispatched_to_dock", "event": "CHARGING_REQUESTED", "robot": robot.robot_id, "dock": list(target_dock), "time": self.time_step})
         else:
             target_dock = min(list(self.warehouse.charging_stations), key=lambda d: self._distance_to_robot(robot.position, d))
             if robot.robot_id not in self.charging_queue:
@@ -896,6 +907,7 @@ class BaseFleetSimulator:
             self._plan_path_for_robot(robot)
             self.metrics.record_event({
                 "type": "charging_queued",
+                "event": "CHARGING_REQUESTED",
                 "robot": robot.robot_id,
                 "battery": round(robot.battery, 1),
                 "queue_rank": rank,
@@ -1033,7 +1045,7 @@ class BaseFleetSimulator:
                         del self.charging_reservations[dock]
                     robot.state = "IDLE"
                     robot.assigned_dock = None
-                    self.metrics.record_event({"type": "robot_charge_complete", "robot": robot.robot_id, "battery": round(robot.battery, 1), "time": self.time_step})
+                    self.metrics.record_event({"type": "robot_charge_complete", "event": "CHARGING_COMPLETED", "robot": robot.robot_id, "battery": round(robot.battery, 1), "time": self.time_step})
 
                     if self.charging_queue:
                         next_rid = self.charging_queue.pop(0)
@@ -1049,7 +1061,7 @@ class BaseFleetSimulator:
                 if robot.assigned_dock and robot.position == robot.assigned_dock:
                     robot.state = "CHARGING"
                     robot.current_path = []
-                    self.metrics.record_event({"type": "robot_docked", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
+                    self.metrics.record_event({"type": "robot_docked", "event": "CHARGING_STARTED", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
                     continue
                 if not robot.current_path or robot.position == robot.current_path[-1]:
                     self._plan_path_for_robot(robot)
@@ -1488,7 +1500,19 @@ class BaseFleetSimulator:
         self.completed_tasks += 1
         self.metrics.completed_tasks += 1
         self.metrics.makespan = max(self.metrics.makespan, self.time_step)
-        self.metrics.record_event({"type": "task_completed", "task": task.task_id, "package": package.package_id, "robot": robot.robot_id, "time": self.time_step})
+        latency = (task.completion_time - task.created_at) if task.created_at is not None else 0.0
+        duration = (task.completion_time - (task.started_at or task.created_at or 0.0))
+        self.metrics.record_event({
+            "type": "task_completed",
+            "event": "TASK_COMPLETED",
+            "task": task.task_id,
+            "task_id": task.task_id,
+            "package": package.package_id if package else "",
+            "robot": robot.robot_id,
+            "latency": latency,
+            "duration": duration,
+            "time": self.time_step,
+        })
 
         # Check if there is another assigned task in this robot's queue first
         has_next = self._activate_next_assigned_task(robot)
@@ -2161,6 +2185,48 @@ class BaseFleetSimulator:
             {"scenario": "WFG Deadlock Break", "makespan": 35.1, "conflicts": 0, "status": "PASSED"},
         ]
 
+        # Operational Metrics (Phase 7)
+        completed_tasks_list = [t for t in self.tasks.values() if t.status == "completed"]
+        completed_count = len(completed_tasks_list)
+        unfinished_count = len(self.tasks) - completed_count
+
+        task_latencies = [
+            (t.completion_time - t.created_at)
+            for t in completed_tasks_list
+            if t.completion_time is not None and t.created_at is not None
+        ]
+        avg_latency = round(sum(task_latencies) / len(task_latencies), 2) if task_latencies else 0.0
+
+        task_durations = [
+            (t.completion_time - (t.started_at or t.created_at))
+            for t in completed_tasks_list
+            if t.completion_time is not None
+        ]
+        avg_completion_time = round(sum(task_durations) / len(task_durations), 2) if task_durations else 0.0
+
+        task_throughput = round((completed_count / total_ticks) * 100, 2)
+        amr_utilization_pct = utilization_breakdown["fleet_overall_utilization"]
+        avg_battery = round(sum(r.battery for r in self.robots.values()) / max(1, len(self.robots)), 1) if self.robots else 100.0
+
+        operational_metrics = {
+            "task_throughput": task_throughput,
+            "avg_task_completion_time": avg_completion_time,
+            "avg_task_latency": avg_latency,
+            "amr_utilization_pct": amr_utilization_pct,
+            "total_idle_ticks": total_idle_ticks,
+            "congestion_score": round(self.congestion_report.score, 2),
+            "conflict_count": self.metrics.prevented_conflicts,
+            "deadlock_count": self.metrics.deadlocks,
+            "replanning_count": self.metrics.replanning_events,
+            "battery_utilization_pct": avg_battery,
+            "battery_consumed": round(self.metrics.battery_consumed, 2),
+            "charging_wait_queue_len": len(self.charging_queue),
+            "task_reassignments": self.metrics.task_reassignments,
+            "failure_events": self.metrics.amr_failures,
+            "completed_tasks": completed_count,
+            "unfinished_tasks": unfinished_count,
+        }
+
         analytics = {
             "completion_times": delivery_times,
             "makespan_comparison": {
@@ -2176,6 +2242,7 @@ class BaseFleetSimulator:
             "p2p_telemetry": p2p_telemetry,
             "battery_curves": battery_curves,
             "scenario_comparison": scenario_matrix,
+            "operational_metrics": operational_metrics,
         }
 
         # Decision Explainer
@@ -2231,7 +2298,8 @@ class BaseFleetSimulator:
                 "active": sum(task.status != "completed" and task.status != "failed" for task in self.tasks.values()),
             },
             "metrics": self.metrics.as_dict(),
-            "events": self.metrics.events[-50:],
+            "operational_metrics": operational_metrics,
+            "events": self.metrics.events[-100:],
             "reservations": [
                 {"cell": list(cell), "time": time_val, "robot": robot}
                 for cell, reservations in self.reservation_table._vertex.items()
