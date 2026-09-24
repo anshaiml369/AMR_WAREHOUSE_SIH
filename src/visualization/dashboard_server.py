@@ -390,6 +390,9 @@ def run_benchmark_route(seed_count: int = 10, robot_count: int = 5, task_count: 
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(ROOT), **kwargs)
+
     def do_GET(self):
         clean_path = urlsplit(self.path).path
         if clean_path.startswith("/static/"):
