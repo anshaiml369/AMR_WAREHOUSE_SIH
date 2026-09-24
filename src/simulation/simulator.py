@@ -289,13 +289,26 @@ class BaseFleetSimulator:
     def _select_robot_for_task(self, task: Task) -> tuple[str, str] | None:
         candidates: list[tuple[float, str, str]] = []
         occupied = {robot.position for robot in self.robots.values()}
+        rejection_reasons: list[str] = []
         for robot in self.robots.values():
-            if robot.failed or robot.state == "FAILED" or robot.current_task is not None or robot.battery < self.config.low_battery_threshold or robot.state in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} or robot.assigned_dock is not None:
+            if robot.failed or robot.state == "FAILED":
+                rejection_reasons.append(f"{robot.robot_id}: failed")
+                continue
+            if robot.current_task is not None:
+                rejection_reasons.append(f"{robot.robot_id}: busy with {robot.current_task}")
+                continue
+            if robot.battery < self.config.low_battery_threshold:
+                rejection_reasons.append(f"{robot.robot_id}: low battery ({robot.battery:.1f}%)")
+                continue
+            if robot.state in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} or robot.assigned_dock is not None:
+                rejection_reasons.append(f"{robot.robot_id}: charging/docked")
                 continue
             rem_assigned = sum(1 for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed")
             if rem_assigned > 0:
+                rejection_reasons.append(f"{robot.robot_id}: active queue ({rem_assigned} tasks)")
                 continue
             if task.metadata.get("stalled_robot") == robot.robot_id:
+                rejection_reasons.append(f"{robot.robot_id}: previously stalled on this task")
                 continue
             blocked = occupied - {robot.position, task.pickup}
             path = a_star(robot.position, task.pickup, self.warehouse, blocked)
@@ -303,12 +316,27 @@ class BaseFleetSimulator:
                 hard_blocked = {peer.position for peer in self.robots.values() if peer.robot_id != robot.robot_id and (peer.failed or peer.state in {"CHARGING", "DOCKED_CHARGING"})}
                 path = a_star(robot.position, task.pickup, self.warehouse, hard_blocked)
                 if len(path) == 1 and robot.position != task.pickup:
+                    rejection_reasons.append(f"{robot.robot_id}: path blocked to pickup")
                     continue
             is_emerg = bool(task.priority >= 5 or task.metadata.get("is_emergency"))
             allowed, alloc_msg = self.allocation_policy.can_assign(robot.robot_id, task.priority, is_emerg)
             if not allowed:
+                rejection_reasons.append(f"{robot.robot_id}: {alloc_msg}")
                 continue
-            distance = max(0, len(path) - 1)
+
+            dist_pickup = max(0, len(path) - 1)
+            dist_delivery = abs(task.destination[0] - task.pickup[0]) + abs(task.destination[1] - task.pickup[1])
+            total_travel_distance = dist_pickup + dist_delivery
+            eff_speed = max(0.2, robot.speed_multiplier * self.global_speed_multiplier)
+            est_travel_time = total_travel_distance / eff_speed
+
+            # Battery feasibility check: safe trip requires consumption buffer
+            est_battery_drain = total_travel_distance * 0.25
+            if robot.battery - est_battery_drain < self.config.low_battery_threshold and not is_emerg:
+                rejection_reasons.append(f"{robot.robot_id}: insufficient battery buffer (battery {robot.battery:.1f}%, needed {est_battery_drain:.1f}%)")
+                continue
+
+            distance = dist_pickup
             p_eval = self.priority_evaluator.evaluate(
                 robot_id=robot.robot_id,
                 carrying_package=bool(robot.carrying_package_id),
@@ -324,16 +352,45 @@ class BaseFleetSimulator:
             quota_factor = 0.0
             if target_obj and target_obj.target_tasks > 0:
                 quota_factor = (target_obj.assigned_tasks / target_obj.target_tasks) * 2.0
-            score = distance + max(0.0, 100.0 - robot.battery) * 0.05 - (p_eval.score * 0.1) + quota_factor
-            reason = f"score={score:.1f}; class={p_eval.priority_class.name}; path={distance}; battery={robot.battery:.1f}; priority={task.priority}; feasible=true; alloc={alloc_msg}; {p_eval.explanation}"
+            
+            # Fleet-aware composite cost
+            travel_time_factor = est_travel_time * 0.5
+            workload_factor = robot.assigned_tasks_count * 1.5
+            battery_penalty = max(0.0, 100.0 - robot.battery) * 0.05
+            congestion_factor = self.congestion_report.score * 1.0
+            priority_bonus = task.priority * 1.0
+
+            score = distance + travel_time_factor + workload_factor + battery_penalty + congestion_factor - priority_bonus - (p_eval.score * 0.1) + quota_factor
+            reason = (
+                f"score={score:.1f}; class={p_eval.priority_class.name}; travel_time={est_travel_time:.1f}s; "
+                f"pickup_dist={distance}; workload={robot.assigned_tasks_count}; battery={robot.battery:.1f}%; "
+                f"congestion={self.congestion_report.score:.2f}; priority={task.priority}; feasible=true; alloc={alloc_msg}; {p_eval.explanation}"
+            )
             candidates.append((score, robot.robot_id, reason))
+
         if not candidates:
             if task.priority >= 5 or task.metadata.get("is_emergency"):
                 preempted = self._attempt_emergency_preemption(task)
                 if preempted:
+                    task.metadata["dispatch_attempt"] = {
+                        "requested": task.task_id,
+                        "actual": preempted[0],
+                        "reason": f"Emergency preemption: {preempted[1]}",
+                    }
                     return preempted
+            task.metadata["dispatch_attempt"] = {
+                "requested": task.task_id,
+                "actual": None,
+                "reason": "; ".join(rejection_reasons[:3]) if rejection_reasons else "No available AMRs in fleet",
+            }
             return None
+
         _, robot_id, reason = min(candidates)
+        task.metadata["dispatch_attempt"] = {
+            "requested": task.task_id,
+            "actual": robot_id,
+            "reason": reason,
+        }
         return robot_id, reason
 
     def _attempt_emergency_preemption(self, emergency_task: Task) -> tuple[str, str] | None:
