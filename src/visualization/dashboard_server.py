@@ -193,6 +193,109 @@ class LiveDashboard:
                 robot_id = str(message.get("robot_id", ""))
                 speed = float(message.get("speed", 1.0))
                 self.simulator.set_robot_speed(robot_id, speed)
+            elif action == "set_global_speed":
+                speed_val = max(0.2, min(float(message.get("speed", message.get("value", 1.0))), 5.0))
+                for r in self.simulator.robots.values():
+                    r.speed_multiplier = speed_val
+                multiplier = max(0.05, min(speed_val, 10.0))
+                self.speed = 0.22 / multiplier
+                self.simulator.metrics.record_event({"type": "global_speed_updated", "speed": speed_val, "time": self.simulator.time_step})
+            elif action == "configure_fleet":
+                r_count = max(1, min(int(message.get("robot_count", message.get("count", 5))), 20))
+                t_count = max(1, min(int(message.get("task_count", message.get("tasks", 10))), 100))
+                tasks_per_amr = message.get("tasks_per_amr")
+                if tasks_per_amr is not None:
+                    t_count = max(t_count, int(tasks_per_amr) * r_count)
+                
+                speed_val = float(message.get("speed", 1.0))
+                self.simulator = DecentralizedFleetSimulator(
+                    build_scenario_warehouse(self.scenario),
+                    SimulationConfig(seed=42, robot_count=r_count, task_count=t_count),
+                )
+                self.simulator.initialize(create_tasks=True)
+                for r in self.simulator.robots.values():
+                    r.speed_multiplier = speed_val
+                
+                if tasks_per_amr is not None:
+                    targets = {rid: int(tasks_per_amr) for rid in self.simulator.robots}
+                    self.simulator.set_task_allocation("hybrid", targets, "Configured custom tasks per AMR")
+                
+                alloc_policy = message.get("allocation_policy")
+                if alloc_policy:
+                    self.simulator.allocation_policy.set_mode(str(alloc_policy).lower())
+                
+                self.running = False
+                self.simulator.metrics.record_event({
+                    "type": "fleet_configured",
+                    "robot_count": r_count,
+                    "task_count": t_count,
+                    "speed": speed_val,
+                    "time": 0
+                })
+            elif action == "assign_tasks_per_amr":
+                per_amr = int(message.get("tasks_per_amr", message.get("count", 2)))
+                new_tasks_count = per_amr * max(1, len(self.simulator.robots))
+                self.simulator.create_tasks(new_tasks_count)
+                targets = {rid: per_amr for rid in self.simulator.robots}
+                self.simulator.set_task_allocation("hybrid", targets, f"Batch dispatch {per_amr} tasks per AMR")
+            elif action == "run_scenario":
+                sc_id = str(message.get("scenario_id") or message.get("name") or "default")
+                self.scenario = sc_id
+                sc_def = self.simulator.scenario_registry.scenarios.get(sc_id)
+                r_count = sc_def.amr_count if sc_def else 5
+                t_count = sc_def.task_count if sc_def else 10
+                
+                wh = build_scenario_warehouse(sc_id)
+                self.simulator = DecentralizedFleetSimulator(
+                    wh,
+                    SimulationConfig(seed=42, robot_count=r_count, task_count=t_count),
+                )
+                self.simulator.initialize(create_tasks=True)
+                if sc_def and sc_def.obstacles:
+                    for obst in sc_def.obstacles:
+                        self.simulator.warehouse.add_dynamic_obstacle(obst)
+                        if obst not in self.simulator.dynamic_blockages:
+                            self.simulator.dynamic_blockages.append(obst)
+                self.simulator.active_scenario = {"id": sc_id, "name": sc_def.name if sc_def else sc_id}
+                self.simulator.execute_tasks()
+                self.running = True
+                self.simulator.metrics.record_event({"type": "scenario_started", "scenario_id": sc_id, "time": 0})
+            elif action == "update_rack":
+                rack_id = str(message.get("rack_id", message.get("id", "")))
+                x = message.get("x")
+                y = message.get("y")
+                width = message.get("width")
+                height = message.get("height")
+                rack_type = message.get("rack_type")
+                orientation = message.get("orientation")
+                tiers = message.get("tiers")
+                ok, msg = self.simulator.update_rack(
+                    rack_id,
+                    x=int(x) if x is not None else None,
+                    y=int(y) if y is not None else None,
+                    width=int(width) if width is not None else None,
+                    height=int(height) if height is not None else None,
+                    rack_type=str(rack_type) if rack_type is not None else None,
+                    orientation=str(orientation) if orientation is not None else None,
+                    tiers=int(tiers) if tiers is not None else None,
+                )
+            elif action == "add_rack":
+                from src.warehouse.warehouse import Rack
+                r_id = str(message.get("rack_id") or message.get("id") or f"rack_{len(self.simulator.warehouse.racks) + 1}")
+                rack = Rack(
+                    rack_id=r_id,
+                    x=int(message.get("x", 2)),
+                    y=int(message.get("y", 2)),
+                    width=int(message.get("width", 3)),
+                    height=int(message.get("height", 1)),
+                    rack_type=str(message.get("rack_type", "medium")),
+                    orientation=str(message.get("orientation", "horizontal")),
+                    tiers=int(message.get("tiers", 3)),
+                )
+                ok, msg = self.simulator.add_rack(rack)
+            elif action in {"delete_rack", "remove_rack"}:
+                rack_id = str(message.get("rack_id", message.get("id", "")))
+                ok, msg = self.simulator.remove_rack(rack_id)
             elif action == "set_task_allocation":
                 mode = str(message.get("mode", "hybrid"))
                 raw_targets = message.get("targets", {})
@@ -273,6 +376,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
+            return
+
+        if clean_path.startswith("/api/racks"):
+            with LIVE.lock:
+                racks = [r.to_dict() for r in LIVE.simulator.warehouse.racks.values()]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(racks).encode("utf-8"))
             return
 
         if clean_path.startswith("/api/scenarios"):
@@ -447,6 +560,76 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        if self.path.startswith("/api/racks/update"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.update_rack(
+                    str(data.get("rack_id", data.get("id", ""))),
+                    x=int(data["x"]) if "x" in data and data["x"] is not None else None,
+                    y=int(data["y"]) if "y" in data and data["y"] is not None else None,
+                    width=int(data["width"]) if "width" in data and data["width"] is not None else None,
+                    height=int(data["height"]) if "height" in data and data["height"] is not None else None,
+                    rack_type=str(data["rack_type"]) if "rack_type" in data and data["rack_type"] is not None else None,
+                    orientation=str(data["orientation"]) if "orientation" in data and data["orientation"] is not None else None,
+                    tiers=int(data["tiers"]) if "tiers" in data and data["tiers"] is not None else None,
+                )
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
+
+        if self.path.startswith("/api/racks/add"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            from src.warehouse.warehouse import Rack
+            r_id = str(data.get("rack_id") or data.get("id") or f"rack_{len(LIVE.simulator.warehouse.racks) + 1}")
+            rack = Rack(
+                rack_id=r_id,
+                x=int(data.get("x", 2)),
+                y=int(data.get("y", 2)),
+                width=int(data.get("width", 3)),
+                height=int(data.get("height", 1)),
+                rack_type=str(data.get("rack_type", "medium")),
+                orientation=str(data.get("orientation", "horizontal")),
+                tiers=int(data.get("tiers", 3)),
+            )
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.add_rack(rack)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg, "rack": rack.to_dict()}).encode("utf-8"))
+            return
+
+        if self.path.startswith("/api/racks/delete"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            r_id = str(data.get("rack_id", data.get("id", "")))
+            with LIVE.lock:
+                ok, msg = LIVE.simulator.remove_rack(r_id)
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
+
         if self.path.startswith("/api/operator/action"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
@@ -454,36 +637,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 data = json.loads(body.decode("utf-8"))
             except Exception:
                 data = {}
-            action_type = data.get("action", "")
-            robot_id = data.get("robot_id", "")
-            cell = data.get("cell")
-            reason = data.get("reason", "Operator manual action")
-            res = False
             with LIVE.lock:
-                if action_type == "pause_robot" and robot_id:
-                    res = LIVE.simulator.operator_pause_robot(robot_id, reason)
-                elif action_type == "resume_robot" and robot_id:
-                    res = LIVE.simulator.operator_resume_robot(robot_id, reason)
-                elif action_type == "close_aisle" and cell:
-                    if isinstance(cell, (list, tuple)) and len(cell) == 2:
-                        res = LIVE.simulator.operator_close_aisle((int(cell[0]), int(cell[1])), reason)
-                    elif isinstance(cell, str):
-                        parts = [int(p.strip()) for p in cell.split(",")]
-                        if len(parts) == 2:
-                            res = LIVE.simulator.operator_close_aisle((parts[0], parts[1]), reason)
-                elif action_type == "open_aisle" and cell:
-                    if isinstance(cell, (list, tuple)) and len(cell) == 2:
-                        res = LIVE.simulator.operator_open_aisle((int(cell[0]), int(cell[1])), reason)
-                    elif isinstance(cell, str):
-                        parts = [int(p.strip()) for p in cell.split(",")]
-                        if len(parts) == 2:
-                            res = LIVE.simulator.operator_open_aisle((parts[0], parts[1]), reason)
+                LIVE.command(data)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(json.dumps({"success": res, "action": action_type}).encode("utf-8"))
+            self.wfile.write(json.dumps({"success": True, "action": data.get("action", "")}).encode("utf-8"))
             return
+
 
         if self.path.startswith("/api/operator/speed"):
             content_len = int(self.headers.get("Content-Length", 0))
@@ -547,22 +709,29 @@ async def websocket_handler(websocket):
 
 
 async def websocket_loop(host: str = "127.0.0.1", port: int = 8765):
-    async with websockets.serve(websocket_handler, host, port):
-        while True:
-            try:
-                LIVE.tick()
-                payload = json.dumps(LIVE.payload())
-                dead_clients = set()
-                for client in list(LIVE.clients):
+    for candidate in range(port, port + 10):
+        try:
+            async with websockets.serve(websocket_handler, host, candidate):
+                print(f"WebSocket server running on ws://{host}:{candidate}")
+                while True:
                     try:
-                        await asyncio.wait_for(client.send(payload), timeout=0.25)
-                    except Exception:
-                        dead_clients.add(client)
-                for dc in dead_clients:
-                    LIVE.clients.discard(dc)
-            except Exception as loop_err:
-                print(f"[WebSocket Loop Warning] {loop_err}")
-            await asyncio.sleep(LIVE.speed)
+                        LIVE.tick()
+                        payload = json.dumps(LIVE.payload())
+                        dead_clients = set()
+                        for client in list(LIVE.clients):
+                            try:
+                                await asyncio.wait_for(client.send(payload), timeout=0.25)
+                            except Exception:
+                                dead_clients.add(client)
+                        for dc in dead_clients:
+                            LIVE.clients.discard(dc)
+                    except Exception as loop_err:
+                        print(f"[WebSocket Loop Warning] {loop_err}")
+                    await asyncio.sleep(LIVE.speed)
+                break
+        except OSError:
+            continue
+
 
 
 def start_dashboard(host: str = "127.0.0.1", port: int = 8000):

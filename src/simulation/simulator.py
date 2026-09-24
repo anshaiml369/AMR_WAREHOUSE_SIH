@@ -1034,7 +1034,8 @@ class BaseFleetSimulator:
 
     def _check_escalation_rules(self) -> None:
         for robot in self.robots.values():
-            if robot.battery < 15.0 and not robot.state.startswith("DOCK"):
+            # Battery warnings & starvation
+            if robot.battery < 15.0 and not robot.state.startswith("DOCK") and robot.state != "CHARGING":
                 free_docks = [d for d in self.warehouse.charging_stations if self.warehouse.is_walkable(d)]
                 if not free_docks:
                     existing = [
@@ -1058,6 +1059,89 @@ class BaseFleetSimulator:
                             attempted_options="Evaluated primary and secondary charging bays; all obstructed or offline",
                             human_action_required="Deploy mobile charger or clear bay access immediately",
                         )
+            elif robot.battery < 25.0 and not robot.state.startswith("DOCK") and robot.state != "CHARGING":
+                existing = [
+                    i for i in self.incident_manager.get_active()
+                    if i.incident_type == "BATTERY_WARNING" and robot.robot_id in i.affected_entities.get("robots", [])
+                ]
+                if not existing:
+                    self.incident_manager.raise_incident(
+                        incident_type="BATTERY_WARNING",
+                        severity=IncidentSeverity.HIGH,
+                        timestamp=self.time_step,
+                        affected_entities={"robots": [robot.robot_id]},
+                        detected_by="BatterySafetyGovernor",
+                        decision="Battery below operational threshold (<25%)",
+                        action="Dispatched to nearest ground-floor charging pad",
+                    )
+            elif robot.battery >= 30.0 or robot.state in {"CHARGING", "DOCKED_CHARGING"}:
+                for inc in self.incident_manager.get_active():
+                    if inc.incident_type == "BATTERY_WARNING" and robot.robot_id in inc.affected_entities.get("robots", []):
+                        self.incident_manager.update_status(inc.id, IncidentStatus.RESOLVED, decision="Battery level recharged", action="Normal fleet operation restored")
+
+            # AMR Corridor Blockage
+            if robot.stuck_ticks >= 2 and not robot.failed and robot.state in {"WAITING", "NEGOTIATING", "REROUTING"}:
+                existing = [
+                    i for i in self.incident_manager.get_active()
+                    if i.incident_type == "AMR_BLOCKED" and robot.robot_id in i.affected_entities.get("robots", [])
+                ]
+                if not existing:
+                    self.incident_manager.raise_incident(
+                        incident_type="AMR_BLOCKED",
+                        severity=IncidentSeverity.MEDIUM,
+                        timestamp=self.time_step,
+                        affected_entities={"robots": [robot.robot_id]},
+                        detected_by="SpatialWatchdog",
+                        decision=f"AMR {robot.robot_id} corridor headway contested at ({robot.position[0]},{robot.position[1]})",
+                        action="P2P reservation arbitration active; awaiting aisle clearance",
+                    )
+            elif robot.stuck_ticks == 0 or robot.state in {"MOVING", "IDLE"}:
+                for inc in self.incident_manager.get_active():
+                    if inc.incident_type == "AMR_BLOCKED" and robot.robot_id in inc.affected_entities.get("robots", []):
+                        self.incident_manager.update_status(inc.id, IncidentStatus.RESOLVED, decision="Corridor reservation cleared", action="Resumed transit")
+
+            # Charging Bay Occupancy Event
+            if robot.state in {"CHARGING", "DOCKED_CHARGING"}:
+                existing = [
+                    i for i in self.incident_manager.get_active()
+                    if i.incident_type == "CHARGING_EVENT" and robot.robot_id in i.affected_entities.get("robots", [])
+                ]
+                if not existing:
+                    self.incident_manager.raise_incident(
+                        incident_type="CHARGING_EVENT",
+                        severity=IncidentSeverity.LOW,
+                        timestamp=self.time_step,
+                        affected_entities={"robots": [robot.robot_id]},
+                        detected_by="PowerSubsystem",
+                        decision=f"AMR {robot.robot_id} docked at charging station ({robot.position[0]},{robot.position[1]})",
+                        action="Fast inductive replenishment active",
+                    )
+            elif robot.state == "IDLE":
+                for inc in self.incident_manager.get_active():
+                    if inc.incident_type == "CHARGING_EVENT" and robot.robot_id in inc.affected_entities.get("robots", []):
+                        self.incident_manager.update_status(inc.id, IncidentStatus.RESOLVED, decision="Charging completed", action="Returned to active fleet pool")
+
+        # Deadlock cycles
+        if self.active_deadlock_cycles:
+            for cycle in self.active_deadlock_cycles:
+                existing = [
+                    i for i in self.incident_manager.get_active()
+                    if i.incident_type == "DEADLOCK_CYCLE_DETECTED" and set(cycle).issubset(set(i.affected_entities.get("robots", [])))
+                ]
+                if not existing:
+                    self.incident_manager.raise_incident(
+                        incident_type="DEADLOCK_CYCLE_DETECTED",
+                        severity=IncidentSeverity.CRITICAL,
+                        timestamp=self.time_step,
+                        affected_entities={"robots": list(cycle)},
+                        detected_by="WaitForGraphAnalyzer",
+                        decision="Circular resource wait dependency detected across corridor",
+                        action="Executing lowest-priority step-aside yield maneuver to break deadlock",
+                    )
+        else:
+            for inc in self.incident_manager.get_active():
+                if inc.incident_type == "DEADLOCK_CYCLE_DETECTED":
+                    self.incident_manager.update_status(inc.id, IncidentStatus.RESOLVED, decision="Deadlock cycle broken", action="Nominal multi-AMR flow restored")
 
         for task in self.tasks.values():
             if task.status == "in_progress" and task.assigned_robot in self.robots and not task.sla_violated:
@@ -1274,16 +1358,80 @@ class BaseFleetSimulator:
             category="OPERATOR_ACTION",
             problem="Update fleet workload distribution and allocation mode",
             reason=f"{reason}. Quotas: {targets}",
-            outcome=f"Allocation mode set to {mode.upper()} with {len(targets)} robot quotas",
+            outcome=f"Mode set to {mode}",
             timestamp=self.time_step,
+            affected_robots=list(targets.keys()),
         )
+        return True, f"Task allocation mode updated to {mode}"
+
+    def update_rack(
+        self,
+        rack_id: str,
+        x: int | None = None,
+        y: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        rack_type: str | None = None,
+        orientation: str | None = None,
+        tiers: int | None = None,
+    ) -> tuple[bool, str]:
+        """Dynamically reconfigures rack geometry, synchronizes occupancy, and triggers AMR route replanning."""
+        success, reason = self.warehouse.update_rack(
+            rack_id, x=x, y=y, width=width, height=height, rack_type=rack_type, orientation=orientation, tiers=tiers
+        )
+        if not success:
+            return False, reason
+
+        # Replanning for any AMR whose planned path intersects newly placed rack footprint
+        replanned_count = 0
+        for robot in self.robots.values():
+            if robot.current_path and any(not self.warehouse.is_walkable(cell) for cell in robot.current_path):
+                target = robot.current_path[-1]
+                if self.warehouse.is_walkable(target):
+                    robot.current_path = a_star(robot.position, target, self.warehouse, set())
+                    replanned_count += 1
+                else:
+                    robot.current_path = []
+
         self.metrics.record_event({
-            "type": "task_allocation_updated",
-            "mode": mode,
-            "targets": targets,
+            "type": "rack_updated",
+            "rack_id": rack_id,
+            "replanned_robots": replanned_count,
             "time": self.time_step,
         })
-        return True, f"Task allocation policy set to {mode} with {len(targets)} targets"
+        self.incident_manager.raise_incident(
+            incident_type="RACK_GEOMETRY_CHANGED",
+            severity=IncidentSeverity.LOW,
+            timestamp=self.time_step,
+            affected_entities={"racks": [rack_id]},
+            detected_by="WarehouseGeometryManager",
+            decision=f"Updated rack {rack_id} dimensions/location. {replanned_count} AMR paths adjusted.",
+            action="Occupancy map rebuilt; two-square corridor spacing validated",
+        )
+        self.decision_logger.log(
+            decision_type="RACK_RECONFIGURED",
+            category="INFRASTRUCTURE",
+            problem=f"Rack {rack_id} reconfigured by operator",
+            reason=f"Geometric bounds updated: {reason}",
+            outcome=f"Static occupancy rebuilt. {replanned_count} active AMR routes replanned.",
+            timestamp=self.time_step,
+            affected_robots=[r.robot_id for r in self.robots.values() if r.current_path],
+        )
+        return True, reason
+
+    def add_rack(self, rack: Any) -> tuple[bool, str]:
+        success, reason = self.warehouse.add_rack(rack)
+        if not success:
+            return False, reason
+        self.metrics.record_event({"type": "rack_added", "rack_id": rack.rack_id, "time": self.time_step})
+        return True, reason
+
+    def remove_rack(self, rack_id: str) -> tuple[bool, str]:
+        success, reason = self.warehouse.remove_rack(rack_id)
+        if not success:
+            return False, reason
+        self.metrics.record_event({"type": "rack_removed", "rack_id": rack_id, "time": self.time_step})
+        return True, reason
 
     def build_dashboard_payload(self) -> dict[str, Any]:
         sla_total = len(self.tasks)
@@ -1435,10 +1583,12 @@ class BaseFleetSimulator:
                 "obstacles": [list(cell) for cell in sorted(self.warehouse.static_obstacles)],
                 "dynamic_obstacles": [list(cell) for cell in sorted(self.warehouse.dynamic_obstacles)],
                 "charging_stations": [list(cell) for cell in sorted(self.warehouse.charging_stations)],
+                "racks": [rack.to_dict() for rack in self.warehouse.racks.values()],
             },
             "grid_size": [self.warehouse.width, self.warehouse.height],
             "obstacles": [list(cell) for cell in self.warehouse.obstacles],
             "charging_stations": [list(cell) for cell in self.warehouse.charging_stations],
+            "racks": [rack.to_dict() for rack in self.warehouse.racks.values()],
             "dynamic_blockages": [list(cell) for cell in self.dynamic_blockages],
             "continuous_dispatch": self.continuous_dispatch,
             "robots": [r.to_dict() for r in self.robots.values()],

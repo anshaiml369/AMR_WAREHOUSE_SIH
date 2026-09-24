@@ -43,11 +43,37 @@ def build_scenario_warehouse(scenario_id: str = "default", width: int = 18, heig
         for x in (0, width - 1):
             warehouse.set_obstacle((x, y))
 
-    # Standard warehouse racking pillars
-    for x in range(2, width - 2):
-        if x % 5 == 0:
-            for y in range(2, height - 2):
-                warehouse.set_obstacle((x, y))
+    # Multi-Rack Layout with exactly 2 grid squares of distance between adjacent rack rows
+    # Rack rows placed at y = 2, 5, 8, 11, 14...
+    # Aisles between rows: y=3..4, 6..7, 9..10, 12..13 (each exactly 2 walkable cells wide)
+    # Cross-aisles for 2-AMR turning & passing: x in {8, 9}
+    from src.warehouse.warehouse import Rack
+    
+    # Row 1 (y=2): Medium + Small on left, Medium + Small on right
+    warehouse.add_rack(Rack("rack_r1_1", x=2, y=2, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r1_2", x=5, y=2, width=3, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+    warehouse.add_rack(Rack("rack_r1_3", x=10, y=2, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r1_4", x=14, y=2, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+
+    # Row 2 (y=5): Large on left, Medium + Medium on right
+    warehouse.add_rack(Rack("rack_r2_1", x=2, y=5, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
+    warehouse.add_rack(Rack("rack_r2_2", x=10, y=5, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r2_3", x=13, y=5, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+
+    # Row 3 (y=8): Medium + Small on left, Large on right
+    warehouse.add_rack(Rack("rack_r3_1", x=2, y=8, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r3_2", x=6, y=8, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+    warehouse.add_rack(Rack("rack_r3_3", x=10, y=8, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
+
+    # Row 4 (y=11): Medium + Medium on left, Medium + Small on right
+    warehouse.add_rack(Rack("rack_r4_1", x=2, y=11, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r4_2", x=5, y=11, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r4_3", x=10, y=11, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    warehouse.add_rack(Rack("rack_r4_4", x=14, y=11, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+
+    # Row 5 (y=14): Large on left, Large on right
+    warehouse.add_rack(Rack("rack_r5_1", x=2, y=14, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
+    warehouse.add_rack(Rack("rack_r5_2", x=10, y=14, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
 
     # Scenario-specific structural geometry
     if scenario_id in {"head_on_conflict", "narrow_aisle"}:

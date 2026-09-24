@@ -106,3 +106,12 @@ def test_live_dashboard_server_commands_non_regression():
         assert dashboard.running is False
         assert dashboard.simulator.time_step == 0
         assert dashboard.scenario == sc_id
+
+    # 9. Rack commands and payload verification
+    payload = dashboard.payload()
+    assert "racks" in payload["warehouse"]
+    assert len(payload["warehouse"]["racks"]) > 0
+    rack_0 = payload["warehouse"]["racks"][0]
+    dashboard.command({"action": "update_rack", "rack_id": rack_0["id"], "tiers": 4})
+    assert dashboard.simulator.warehouse.racks[rack_0["id"]].tiers == 4
+
