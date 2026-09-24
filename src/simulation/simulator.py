@@ -47,6 +47,12 @@ class SimulationConfig:
     low_battery_threshold: float = 25.0
     charge_recovery_threshold: float = 85.0
 
+    def __post_init__(self) -> None:
+        if self.robot_count < 0 or self.robot_count > 20:
+            raise ValueError(f"Invalid AMR count: {self.robot_count}. Fleet size must be between 0 and 20 AMRs.")
+        if self.task_count < 0 or self.task_count > 100:
+            raise ValueError(f"Invalid task count: {self.task_count}. Workload must be between 0 and 100 tasks.")
+
 
 class BaseFleetSimulator:
     def __init__(self, warehouse: Warehouse, config: SimulationConfig | None = None):
@@ -122,28 +128,104 @@ class BaseFleetSimulator:
 
     def add_task(self, task: Task) -> None:
         self.tasks[task.task_id] = task
+        if task.package_id is None:
+            task.package_id = f"PKG-{task.task_id}"
+        if task.package_id not in self.packages:
+            self.packages[task.package_id] = Package(task.package_id, task.pickup, task.destination, task.task_id)
+
+    def _get_fleet_home_positions(self, count: int) -> list[tuple[int, int]]:
+        positions: list[tuple[int, int]] = []
+        if hasattr(self.warehouse, "home_cells") and self.warehouse.home_cells:
+            sorted_home = sorted(self.warehouse.home_cells, key=lambda c: (c[1], c[0]))
+            for cell in sorted_home:
+                if self.warehouse.is_walkable(cell) and cell not in positions:
+                    positions.append(cell)
+                if len(positions) == count:
+                    break
+
+        if len(positions) < count and self.warehouse.height >= 20:
+            row1 = self.warehouse.height - 4
+            row2 = self.warehouse.height - 3
+            for r in (row1, row2):
+                for c in range(2, self.warehouse.width - 2):
+                    cell = (c, r)
+                    if self.warehouse.is_walkable(cell) and cell not in positions:
+                        positions.append(cell)
+                    if len(positions) == count:
+                        break
+                if len(positions) == count:
+                    break
+
+        if len(positions) < count:
+            candidates = [(x, y) for y in range(self.warehouse.height - 2, 0, -1) for x in range(1, self.warehouse.width - 1)]
+            for cell in candidates:
+                if self.warehouse.is_walkable(cell) and cell not in self.warehouse.charging_stations and cell not in positions:
+                    positions.append(cell)
+                if len(positions) == count:
+                    break
+
+        if len(positions) < count:
+            for cell in [(x, y) for y in range(1, self.warehouse.height - 1) for x in range(1, self.warehouse.width - 1)]:
+                if self.warehouse.is_walkable(cell) and cell not in positions:
+                    positions.append(cell)
+                if len(positions) == count:
+                    break
+
+        return positions
 
     def _generate_default_robots(self) -> None:
+        home_positions = self._get_fleet_home_positions(self.config.robot_count)
         for i in range(self.config.robot_count):
-            start = self._find_spawn_cell(i)
+            start = home_positions[i] if i < len(home_positions) else self._find_spawn_cell(i)
             robot = AMRRobot(robot_id=f"AMR-{i + 1:03d}", position=start, battery=100.0)
             robot.state = "IDLE"
             robot.home_position = start
             self.add_robot(robot)
 
     def _find_spawn_cell(self, index: int) -> tuple[int, int]:
-        candidates = [(x, y) for y in range(1, self.warehouse.height - 1) for x in range(1, self.warehouse.width - 1)]
-        free = [cell for cell in candidates if self.warehouse.is_walkable(cell) and cell not in {robot.position for robot in self.robots.values()}]
-        if not free:
+        candidates = self._get_fleet_home_positions(self.config.robot_count + index + 1)
+        free = [c for c in candidates if c not in {robot.position for robot in self.robots.values()}]
+        if free:
+            return free[0]
+        all_free = [
+            (x, y) for y in range(1, self.warehouse.height - 1) for x in range(1, self.warehouse.width - 1)
+            if self.warehouse.is_walkable((x, y)) and (x, y) not in {robot.position for robot in self.robots.values()}
+        ]
+        if not all_free:
             raise ValueError("warehouse has no free spawn cell")
-        return free[index % len(free)]
+        return all_free[index % len(all_free)]
+
+    def _generate_candidate_cells(self) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+        pickups: list[tuple[int, int]] = []
+        destinations: list[tuple[int, int]] = []
+        for y in range(1, self.warehouse.height - 1):
+            for x in range(1, self.warehouse.width - 1):
+                cell = (x, y)
+                if not self.warehouse.is_walkable(cell):
+                    continue
+                if cell in self.warehouse.charging_stations or cell in self.warehouse.home_cells:
+                    continue
+                if x <= (self.warehouse.width // 2):
+                    pickups.append(cell)
+                if x >= (self.warehouse.width // 2) - 1:
+                    destinations.append(cell)
+        if not pickups:
+            pickups = [(2, 3)]
+        if not destinations:
+            destinations = [(self.warehouse.width - 3, 3)]
+        return pickups, destinations
 
     def _generate_tasks(self) -> None:
-        pickup_candidates = [(2, 3), (3, 5), (4, 7), (6, 5), (7, 8), (8, 11), (3, 12), (7, 13), (12, 4), (13, 7)]
-        destination_candidates = [(14, 4), (14, 7), (14, 10), (14, 13), (13, 5), (13, 8), (12, 11), (12, 14), (11, 4), (11, 13)]
+        self.tasks.clear()
+        self.packages.clear()
+        if self.config.task_count <= 0:
+            return
+        pickups, destinations = self._generate_candidate_cells()
         for i in range(self.config.task_count):
-            pickup = next((cell for cell in pickup_candidates[i % len(pickup_candidates):] + pickup_candidates[:i % len(pickup_candidates)] if self.warehouse.is_walkable(cell)), (2, 2))
-            destination = next((cell for cell in destination_candidates[i % len(destination_candidates):] + destination_candidates[:i % len(destination_candidates)] if self.warehouse.is_walkable(cell)), (self.warehouse.width - 4, self.warehouse.height - 4))
+            pickup = pickups[i % len(pickups)]
+            destination = destinations[(i * 3 + 1) % len(destinations)]
+            if pickup == destination:
+                destination = destinations[(i * 3 + 2) % len(destinations)]
             dist = abs(pickup[0] - destination[0]) + abs(pickup[1] - destination[1])
             deadline = self.time_step + max(25, dist * 3)
             task = Task(task_id=f"T{i}", pickup=pickup, destination=destination, priority=1 + (i % 3), created_at=self.time_step, deadline=deadline)
@@ -153,7 +235,37 @@ class BaseFleetSimulator:
             self.add_task(task)
             self.packages[task.package_id] = Package(task.package_id, pickup, destination, task.task_id)
 
+    def _activate_next_assigned_task(self, robot: AMRRobot) -> bool:
+        """
+        Activates the next pending task explicitly assigned to this robot in its queue.
+        Ensures an AMR continues working through its assigned queue before returning home.
+        """
+        if robot.current_task is not None:
+            return True
+        pending = [
+            t for t in self.tasks.values()
+            if t.assigned_robot == robot.robot_id and t.status in {"pending", "queued"}
+        ]
+        if pending:
+            pending.sort(key=lambda t: (-t.priority, t.created_at or 0, t.task_id))
+            next_t = pending[0]
+            robot.current_task = next_t.task_id
+            robot.returning_home = False
+            robot.state = "MOVING_TO_PICKUP"
+            robot.current_goal = next_t.pickup
+            next_t.status = "in_progress"
+            next_t.started_at = self.time_step
+            self._plan_path_for_robot(robot)
+            self.metrics.record_event({"type": "task_assigned", "task": next_t.task_id, "robot": robot.robot_id, "reason": "next_in_queue", "time": self.time_step})
+            return True
+        return False
+
     def _assign_initial_tasks(self) -> None:
+        # First activate pre-assigned queue tasks for idle robots
+        for robot in self.robots.values():
+            if robot.current_task is None:
+                self._activate_next_assigned_task(robot)
+
         for task_id, task in self.tasks.items():
             if task.assigned_robot is not None:
                 continue
@@ -163,10 +275,12 @@ class BaseFleetSimulator:
             robot_id, allocation_reason = selection
             task.assigned_robot = robot_id
             self.robots[robot_id].current_task = task_id
+            self.robots[robot_id].returning_home = False
             self.robots[robot_id].state = "MOVING_TO_PICKUP"
             task.status = "in_progress"
             task.started_at = self.time_step
             task.allocation_reason = allocation_reason
+            self._plan_path_for_robot(self.robots[robot_id])
             self.metrics.record_event({"type": "task_assigned", "task": task_id, "robot": robot_id, "reason": task.allocation_reason, "time": self.time_step})
 
     def _distance_to_robot(self, position: tuple[int, int], target: tuple[int, int]) -> int:
@@ -178,12 +292,18 @@ class BaseFleetSimulator:
         for robot in self.robots.values():
             if robot.failed or robot.state == "FAILED" or robot.current_task is not None or robot.battery < self.config.low_battery_threshold or robot.state in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} or robot.assigned_dock is not None:
                 continue
+            rem_assigned = sum(1 for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed")
+            if rem_assigned > 0:
+                continue
             if task.metadata.get("stalled_robot") == robot.robot_id:
                 continue
             blocked = occupied - {robot.position, task.pickup}
             path = a_star(robot.position, task.pickup, self.warehouse, blocked)
             if len(path) == 1 and robot.position != task.pickup:
-                continue
+                hard_blocked = {peer.position for peer in self.robots.values() if peer.robot_id != robot.robot_id and (peer.failed or peer.state in {"CHARGING", "DOCKED_CHARGING"})}
+                path = a_star(robot.position, task.pickup, self.warehouse, hard_blocked)
+                if len(path) == 1 and robot.position != task.pickup:
+                    continue
             is_emerg = bool(task.priority >= 5 or task.metadata.get("is_emergency"))
             allowed, alloc_msg = self.allocation_policy.can_assign(robot.robot_id, task.priority, is_emerg)
             if not allowed:
@@ -287,13 +407,33 @@ class BaseFleetSimulator:
             robot.current_task = None
             robot.current_goal = None
             robot.current_path = []
-            robot.state = "IDLE"
             self.completed_tasks += 1
             self.metrics.completed_tasks += 1
             self.metrics.record_event({"type": "task_complete", "task": task.task_id, "robot": robot.robot_id, "time": self.time_step})
             self.metrics.makespan = max(self.metrics.makespan, self.time_step)
+            has_next = self._activate_next_assigned_task(robot)
+            if not has_next and self.task_execution_active:
+                self._assign_unassigned_tasks()
+            rem_assigned = [t for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed"]
+            if robot.current_task is None and len(rem_assigned) == 0 and robot.home_position and robot.position != robot.home_position:
+                robot.returning_home = True
+                robot.state = "RETURNING_HOME"
+                robot.current_goal = robot.home_position
+                robot.current_path = self._plan_path_for_robot(robot)
+            else:
+                if robot.current_task is not None or len(rem_assigned) > 0:
+                    robot.returning_home = False
+                elif robot.position == robot.home_position:
+                    robot.returning_home = False
+                    if robot.home_position in self.warehouse.charging_stations:
+                        robot.state = "CHARGING"
+                        robot.assigned_dock = robot.home_position
+                    else:
+                        robot.state = "IDLE"
+                else:
+                    robot.state = "IDLE"
 
-    def _plan_path_for_robot(self, robot: AMRRobot) -> list[tuple[int, int]]:
+    def _plan_path_for_robot(self, robot: AMRRobot, extra_blocked: set[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
         if robot.current_task and robot.current_task in self.tasks:
             task = self.tasks[robot.current_task]
             target = task.pickup if robot.position != task.pickup else task.destination
@@ -304,8 +444,27 @@ class BaseFleetSimulator:
         else:
             return []
         robot.current_goal = target
+        if robot.position == target:
+            robot.current_path = [target]
+            robot.current_waypoint = 0
+            return [target]
+
         occupied = {peer.position for peer in self.robots.values() if peer.robot_id != robot.robot_id and peer.position != target}
+        if extra_blocked:
+            occupied.update(extra_blocked)
         path = a_star(robot.position, target, self.warehouse, occupied)
+        if len(path) <= 1:
+            hard_blocked = {
+                peer.position for peer in self.robots.values()
+                if peer.robot_id != robot.robot_id
+                and peer.position != target
+                and (peer.failed or peer.state in {"CHARGING", "DOCKED_CHARGING"})
+            }
+            if extra_blocked:
+                hard_blocked.update(extra_blocked)
+            path = a_star(robot.position, target, self.warehouse, hard_blocked)
+        if len(path) <= 1:
+            path = a_star(robot.position, target, self.warehouse, extra_blocked)
         robot.current_path = path
         robot.current_waypoint = 0
         self.metrics.record_event({"type": "path_planned", "robot": robot.robot_id, "goal": target, "time": self.time_step})
@@ -347,13 +506,19 @@ class BaseFleetSimulator:
             self._assign_initial_tasks()
         self.metrics.record_event({"type": "simulation_initialized", "status": "READY", "time": self.time_step})
 
-    def create_fleet(self, count: int) -> None:
-        count = max(1, min(int(count), 50))
+    def create_fleet(self, count: int) -> tuple[bool, str]:
+        if count < 0 or count > 20:
+            msg = f"Invalid AMR count: {count}. Fleet size must be between 0 and 20 AMRs."
+            return False, msg
         self.config.robot_count = count
         self.initialize(create_tasks=False)
         self.metrics.record_event({"type": "fleet_created", "count": count, "time": self.time_step})
+        return True, f"Fleet of {count} AMRs created successfully."
 
-    def create_tasks(self, count: int) -> None:
+    def create_tasks(self, count: int) -> tuple[bool, str]:
+        if count < 0 or count > 100:
+            msg = f"Invalid task count: {count}. Workload must be between 0 and 100 tasks."
+            return False, msg
         self.tasks.clear()
         self.packages.clear()
         for robot in self.robots.values():
@@ -363,25 +528,45 @@ class BaseFleetSimulator:
             robot.current_path = []
             if robot.state not in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"}:
                 robot.state = "IDLE"
-        self.config.task_count = max(1, min(int(count), 100))
+        self.config.task_count = count
         self._generate_tasks()
         self.task_execution_active = False
         self.task_execution_state = "QUEUED"
         self.simulation_status = "READY"
-        self.metrics.record_event({"type": "tasks_created", "count": self.config.task_count, "time": self.time_step})
+        self.metrics.record_event({"type": "tasks_created", "count": count, "time": self.time_step})
+        return True, f"{count} tasks created successfully."
 
-    def execute_tasks(self) -> None:
+    def execute_tasks(self) -> tuple[bool, str]:
         """
         Dispatches queued demand to AMRs and activates task execution loop.
         """
+        if not self.robots or len(self.robots) == 0:
+            msg = "Execution cannot occur: 0 AMRs available in fleet. Please spawn AMRs before executing tasks."
+            self.task_execution_active = False
+            self.task_execution_state = "BLOCKED_NO_AMRS"
+            self.simulation_status = "READY"
+            self.decision_logger.log(
+                decision_type="VALIDATION_BLOCKED",
+                category="OPERATIONAL_RULE",
+                problem="Task execution requested with 0 AMRs",
+                reason=msg,
+                outcome="Execution halted until AMRs are available",
+                timestamp=self.time_step,
+            )
+            self.metrics.record_event({"type": "execution_blocked", "reason": msg, "time": self.time_step})
+            return False, msg
+
         self.task_execution_active = True
         self.task_execution_state = "EXECUTING"
         self.simulation_status = "RUNNING"
         for robot in self.robots.values():
             robot.returning_home = False
+            if robot.current_task is None:
+                self._activate_next_assigned_task(robot)
         self._assign_initial_tasks()
         self._assign_unassigned_tasks()
         self.metrics.record_event({"type": "tasks_execution_started", "time": self.time_step})
+        return True, "Task execution started"
 
     def start_judge_demo(self) -> None:
         self.demo_mode = True
@@ -481,10 +666,33 @@ class BaseFleetSimulator:
                     bid_p = NegotiationProtocol.compute_priority_bid(bool(peer.carrying_package_id), task_p.priority if task_p else 1, peer.battery, len(peer.current_path))
                     winner, loser, reason = NegotiationProtocol.negotiate_conflict(robot.robot_id, peer.robot_id, bid_r, bid_p)
                     self.metrics.record_event({"type": "p2p_negotiation_resolved", "winner": winner, "loser": loser, "reason": reason, "time": self.time_step})
+
+                    is_head_on = bool(peer.current_path and len(peer.current_path) > 1 and peer.current_path[1] == robot.position)
+                    if (is_head_on or robot.waiting_time >= 2) and loser == robot.robot_id:
+                        alt_path = a_star(robot.position, robot.current_goal, self.warehouse, blocked=set(positions.values()) | {target_cell})
+                        if len(alt_path) > 1:
+                            robot.current_path = alt_path
+                            robot.state = "REROUTING"
+                            robot.waiting_time = 0
+                            self.metrics.replanning_events += 1
+                            self.metrics.record_event({"type": "route_replanned", "robot": robot.robot_id, "time": self.time_step})
+                            return False
+                        all_pos = set(positions.values()) | {robot.position}
+                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            cand = (robot.position[0] + dx, robot.position[1] + dy)
+                            if self.warehouse.is_walkable(cand) and cand not in all_pos and cand != target_cell:
+                                self.reservation_table.release(robot.robot_id)
+                                self.reservation_table.reserve(robot.robot_id, cand, self.time_step)
+                                robot.position = cand
+                                robot.state = "REROUTING"
+                                robot.current_path = []
+                                robot.waiting_time = 0
+                                self.metrics.replanning_events += 1
+                                self._plan_path_for_robot(robot, extra_blocked={target_cell})
+                                return False
             self.metrics.record_event({"type": "conflict_detected", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             self.metrics.record_event({"type": "collision_prevented", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             robot.state = "WAITING"
-            robot.waiting_time += 1
             return False
         if not self.reservation_table.reserve(robot.robot_id, target_cell, self.time_step):
             self.metrics.prevented_conflicts += 1
@@ -530,12 +738,14 @@ class BaseFleetSimulator:
                 robot_id, allocation_reason = selection
                 task.assigned_robot = robot_id
                 self.robots[robot_id].current_task = task.task_id
+                self.robots[robot_id].returning_home = False
                 self.robots[robot_id].state = "MOVING_TO_PICKUP"
                 self.robots[robot_id].assigned_tasks_count += 1
                 self.allocation_policy.record_assignment(robot_id)
                 task.status = "in_progress"
                 task.started_at = self.time_step
                 task.allocation_reason = allocation_reason
+                self._plan_path_for_robot(self.robots[robot_id])
                 self.metrics.record_event({"type": "task_assigned", "task": task.task_id, "robot": robot_id, "reason": task.allocation_reason, "time": self.time_step})
 
     def _send_to_charge(self, robot: AMRRobot) -> None:
@@ -678,11 +888,37 @@ class BaseFleetSimulator:
                     continue
 
             if robot.current_task is None:
-                if self.tasks and all(task.status == "completed" for task in self.tasks.values()) and not self.continuous_dispatch:
-                    self._return_robot_home(robot)
+                if not self._activate_next_assigned_task(robot):
+                    if self.task_execution_active:
+                        self._assign_unassigned_tasks()
+                if robot.current_task is not None:
+                    pass
                 else:
-                    robot.state = "IDLE"
-                continue
+                    rem_assigned = [t for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed"]
+                    if len(rem_assigned) > 0:
+                        robot.returning_home = False
+                        continue
+                    if robot.home_position and robot.position != robot.home_position:
+                        robot.movement_accumulator += (robot.speed_multiplier * self.global_speed_multiplier)
+                        steps_budget = int(robot.movement_accumulator)
+                        robot.movement_accumulator -= steps_budget
+                        if steps_budget >= 1:
+                            for _ in range(steps_budget):
+                                if robot.current_task is not None or robot.position == robot.home_position:
+                                    break
+                                self._return_robot_home(robot)
+                    else:
+                        if robot.home_position and robot.position == robot.home_position:
+                            robot.returning_home = False
+                            if robot.home_position in self.warehouse.charging_stations:
+                                robot.state = "CHARGING"
+                                robot.assigned_dock = robot.home_position
+                                robot.battery = min(robot.max_battery, robot.battery + 1.5)
+                            else:
+                                robot.state = "IDLE"
+                        else:
+                            robot.state = "IDLE"
+                    continue
 
             if robot.manual_command and robot.state == "MANUAL_CONTROL":
                 self._manual_step(robot)
@@ -733,7 +969,7 @@ class BaseFleetSimulator:
                         if robot.position == task.destination and robot.carrying_package_id:
                             self._deliver_package(robot, task)
                             break
-                    elif robot.waiting_time >= 6:
+                    elif robot.waiting_time >= 4:
                         robot.state = "REROUTING"
                         robot.current_path = []
                         robot.waiting_time = 0
@@ -741,6 +977,7 @@ class BaseFleetSimulator:
                         self.metrics.replanning_events += 1
                         self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
                         self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                        self._plan_path_for_robot(robot, extra_blocked={next_cell})
                         break
                     else:
                         break
@@ -748,7 +985,7 @@ class BaseFleetSimulator:
                     robot.state = "WAITING"
                     self.metrics.waiting_time += 1
                     robot.waiting_time += 1
-                    if robot.waiting_time >= 6:
+                    if robot.waiting_time >= 4:
                         robot.state = "REROUTING"
                         robot.current_path = []
                         robot.waiting_time = 0
@@ -756,6 +993,7 @@ class BaseFleetSimulator:
                         self.metrics.replanning_events += 1
                         self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
                         self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                        self._plan_path_for_robot(robot)
                     break
 
         # Graph-theoretic Wait-For Graph (WFG) cycle detection & breaking
@@ -826,49 +1064,77 @@ class BaseFleetSimulator:
         for cycle in cycles:
             self.metrics.deadlocks += 1
             cycle_robots = [self.robots[rid] for rid in cycle[:-1] if rid in self.robots]
-            if cycle_robots:
-                scored = []
-                for r in cycle_robots:
-                    t = self.tasks.get(r.current_task) if r.current_task else None
-                    p_eval = self.priority_evaluator.evaluate(
-                        robot_id=r.robot_id,
-                        carrying_package=bool(r.carrying_package_id),
-                        task_priority=t.priority if t else 1,
-                        battery=r.battery,
-                        time_step=self.time_step,
-                        deadline=t.deadline if t else None,
-                        remaining_distance=len(r.current_path),
-                        congestion_score=self.congestion_report.score,
-                    )
-                    scored.append((p_eval.score, p_eval, r))
+            if not cycle_robots:
+                continue
+            scored = []
+            for r in cycle_robots:
+                t = self.tasks.get(r.current_task) if r.current_task else None
+                p_eval = self.priority_evaluator.evaluate(
+                    robot_id=r.robot_id,
+                    carrying_package=bool(r.carrying_package_id),
+                    task_priority=t.priority if t else 1,
+                    battery=r.battery,
+                    time_step=self.time_step,
+                    deadline=t.deadline if t else None,
+                    remaining_distance=len(r.current_path),
+                    congestion_score=self.congestion_report.score,
+                )
+                scored.append((p_eval.score, p_eval, r))
 
-                scored.sort(key=lambda item: item[0])
-                min_score, min_eval, conceding_robot = scored[0]
+            scored.sort(key=lambda item: item[0])
+            min_score, min_eval, conceding_robot = scored[0]
 
+            idx = cycle.index(conceding_robot.robot_id)
+            other_rid = cycle[idx + 1] if idx + 1 < len(cycle) else cycle[0]
+            other_robot = self.robots.get(other_rid)
+
+            all_robot_pos = {r.position for r in self.robots.values()}
+            evac_cell = None
+            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                cand = (conceding_robot.position[0] + dx, conceding_robot.position[1] + dy)
+                if self.warehouse.is_walkable(cand) and cand not in all_robot_pos:
+                    if other_robot and cand == other_robot.position:
+                        continue
+                    evac_cell = cand
+                    break
+
+            if evac_cell:
+                self.reservation_table.release(conceding_robot.robot_id)
+                self.reservation_table.reserve(conceding_robot.robot_id, evac_cell, self.time_step)
+                conceding_robot.position = evac_cell
                 conceding_robot.state = "REROUTING"
                 conceding_robot.current_path = []
                 conceding_robot.waiting_time = 0
-                self.metrics.replanning_events += 1
+                blocked = {other_robot.position} if other_robot else None
+                self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
+                outcome_desc = f"{conceding_robot.robot_id} evacuated corridor into buffer cell {evac_cell}"
+            else:
+                blocked = {other_robot.position} if other_robot else None
+                conceding_robot.state = "REROUTING"
+                conceding_robot.current_path = []
+                conceding_robot.waiting_time = 0
+                self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
+                outcome_desc = f"{conceding_robot.robot_id} rerouted path avoiding conflict zone"
 
-                scores_detail = ", ".join(f"{r.robot_id}: {s:.1f} ({ev.priority_class.name})" for s, ev, r in scored)
-                self.decision_logger.log(
-                    decision_type="DEADLOCK_CYCLE_BREAK",
-                    category="DEADLOCK_ARBITRATION",
-                    problem=f"Directed WFG cycle: {' -> '.join(cycle)} [{scores_detail}]",
-                    reason=f"{conceding_robot.robot_id} yielded (lowest operational score {min_score:.1f} in cycle)",
-                    outcome=f"{conceding_robot.robot_id} evacuated corridor into buffer cell",
-                    timestamp=self.time_step,
-                    affected_robots=[r.robot_id for r in cycle_robots],
-                )
-
-                self.metrics.record_event({
-                    "type": "deadlock_cycle_broken",
-                    "cycle": cycle,
-                    "broken_by": conceding_robot.robot_id,
-                    "priority_score": min_score,
-                    "method": "priority_wfg_cycle_resolution",
-                    "time": self.time_step,
-                })
+            self.metrics.replanning_events += 1
+            scores_detail = ", ".join(f"{r.robot_id}: {s:.1f} ({ev.priority_class.name})" for s, ev, r in scored)
+            self.decision_logger.log(
+                decision_type="DEADLOCK_CYCLE_BREAK",
+                category="DEADLOCK_ARBITRATION",
+                problem=f"Directed WFG cycle: {' -> '.join(cycle)} [{scores_detail}]",
+                reason=f"{conceding_robot.robot_id} yielded (lowest operational score {min_score:.1f} in cycle)",
+                outcome=outcome_desc,
+                timestamp=self.time_step,
+                affected_robots=[r.robot_id for r in cycle_robots],
+            )
+            self.metrics.record_event({
+                "type": "deadlock_cycle_broken",
+                "cycle": cycle,
+                "broken_by": conceding_robot.robot_id,
+                "priority_score": min_score,
+                "method": "priority_wfg_cycle_resolution",
+                "time": self.time_step,
+            })
         return cycles
 
     def _update_demo_tour_step(self) -> None:
@@ -939,6 +1205,10 @@ class BaseFleetSimulator:
                 })
 
     def _pickup_package(self, robot: AMRRobot, task: Task) -> None:
+        if task.package_id is None:
+            task.package_id = f"PKG-{task.task_id}"
+        if task.package_id not in self.packages:
+            self.packages[task.package_id] = Package(task.package_id, task.pickup, task.destination, task.task_id)
         package = self.packages[task.package_id]
         package.state = "carried"
         package.carried_by_robot = robot.robot_id
@@ -948,10 +1218,13 @@ class BaseFleetSimulator:
         self.metrics.record_event({"type": "package_picked_up", "task": task.task_id, "package": package.package_id, "robot": robot.robot_id, "time": self.time_step})
 
     def _deliver_package(self, robot: AMRRobot, task: Task) -> None:
-        package = self.packages[task.package_id]
-        package.state = "delivered"
-        package.carried_by_robot = None
-        package.position = task.destination
+        if task.package_id is None:
+            task.package_id = f"PKG-{task.task_id}"
+        if task.package_id in self.packages:
+            package = self.packages[task.package_id]
+            package.state = "delivered"
+            package.carried_by_robot = None
+            package.position = task.destination
         robot.carrying_package_id = None
         robot.completed_tasks += 1
         self.allocation_policy.record_completion(robot.robot_id)
@@ -968,29 +1241,96 @@ class BaseFleetSimulator:
         self.metrics.makespan = max(self.metrics.makespan, self.time_step)
         self.metrics.record_event({"type": "task_completed", "task": task.task_id, "package": package.package_id, "robot": robot.robot_id, "time": self.time_step})
 
+        # Check if there is another assigned task in this robot's queue first
+        has_next = self._activate_next_assigned_task(robot)
+
+        # If not, check if there is an unassigned task for this robot to execute immediately
+        if not has_next and self.task_execution_active:
+            self._assign_unassigned_tasks()
+
+        # Only return home if ALL assigned tasks for this robot are complete and no active task
+        remaining_assigned = [t for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed"]
+        if robot.current_task is None and len(remaining_assigned) == 0:
+            if robot.home_position and robot.position != robot.home_position:
+                robot.returning_home = True
+                robot.state = "RETURNING_HOME"
+                robot.current_goal = robot.home_position
+                robot.current_path = self._plan_path_for_robot(robot)
+            elif robot.position == robot.home_position:
+                robot.returning_home = False
+                if robot.home_position in self.warehouse.charging_stations:
+                    robot.state = "CHARGING"
+                    robot.assigned_dock = robot.home_position
+                else:
+                    robot.state = "IDLE"
+        elif robot.current_task is not None or len(remaining_assigned) > 0:
+            robot.returning_home = False
+
     def _return_robot_home(self, robot: AMRRobot) -> None:
+        if robot.current_task is not None:
+            robot.returning_home = False
+            return
+        remaining_assigned = [t for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed"]
+        if len(remaining_assigned) > 0:
+            robot.returning_home = False
+            self._activate_next_assigned_task(robot)
+            return
+
         if not robot.home_position or robot.position == robot.home_position:
             robot.returning_home = False
-            robot.state = "IDLE"
-            return
-        if self.returning_robot_id is None:
-            self.returning_robot_id = robot.robot_id
-        if self.returning_robot_id != robot.robot_id:
-            robot.state = "IDLE"
-            return
-        robot.returning_home = True
-        robot.state = "RETURNING_HOME"
-        if not robot.current_path:
-            self._plan_path_for_robot(robot)
-        if len(robot.current_path) > 1:
-            if self._move_robot(robot, robot.current_path[1]):
-                robot.current_path = robot.current_path[1:]
-        elif robot.position == robot.home_position:
-            robot.returning_home = False
-            self.returning_robot_id = None
             robot.current_goal = None
             robot.current_path = []
-            robot.state = "IDLE"
+            if robot.home_position and robot.home_position in self.warehouse.charging_stations:
+                robot.state = "CHARGING"
+                robot.assigned_dock = robot.home_position
+                robot.battery = min(robot.max_battery, robot.battery + 1.5)
+            else:
+                robot.state = "IDLE"
+            return
+
+        robot.returning_home = True
+        robot.state = "RETURNING_HOME"
+        robot.current_goal = robot.home_position
+
+        if not robot.current_path or robot.position == robot.current_path[-1]:
+            robot.current_path = self._plan_path_for_robot(robot)
+        elif any(not self.warehouse.is_walkable(cell) for cell in robot.current_path):
+            robot.current_path = self._plan_path_for_robot(robot)
+            robot.state = "REROUTING"
+            self.metrics.replanning_events += 1
+
+        if len(robot.current_path) > 1:
+            next_cell = robot.current_path[1]
+            if self._move_robot(robot, next_cell):
+                self.metrics.messages_sent += 1
+                robot.current_path = robot.current_path[1:]
+                if robot.position == robot.home_position:
+                    robot.returning_home = False
+                    robot.current_goal = None
+                    robot.current_path = []
+                    if robot.home_position in self.warehouse.charging_stations:
+                        robot.state = "CHARGING"
+                        robot.assigned_dock = robot.home_position
+                    else:
+                        robot.state = "IDLE"
+            elif robot.waiting_time >= 4:
+                robot.state = "REROUTING"
+                robot.current_path = []
+                robot.waiting_time = 0
+                self.metrics.deadlocks += 1
+                self.metrics.replanning_events += 1
+                self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
+                self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                self._plan_path_for_robot(robot, extra_blocked={next_cell})
+        elif robot.position == robot.home_position:
+            robot.returning_home = False
+            robot.current_goal = None
+            robot.current_path = []
+            if robot.home_position in self.warehouse.charging_stations:
+                robot.state = "CHARGING"
+                robot.assigned_dock = robot.home_position
+            else:
+                robot.state = "IDLE"
 
     def _broadcast_peer_intents(self) -> None:
         for robot in self.robots.values():

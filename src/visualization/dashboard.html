@@ -576,8 +576,20 @@
       border-color: #059669;
       color: #059669;
     }
-    .robot.returning_to_charge {
+    .robot.returning_to_charge, .robot.returning_home {
       border-color: #0284c7;
+      color: #0369a1;
+    }
+    .cell.home-bay {
+      background: #f0fdf4;
+      border: 1.5px dashed #10b981;
+      font-size: 8px;
+    }
+    .cell.home-bay::before {
+      content: '⌂';
+      font-size: 8px;
+      color: #059669;
+      opacity: 0.6;
     }
     .robot.failed {
       background: #fee2e2;
@@ -1040,24 +1052,23 @@
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <span style="color:var(--cyan); font-weight:900; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;">🤖 Fleet AMRs:</span>
-            <input type="number" id="inputAmrCount" min="1" max="20" value="5" style="width:55px; font-family:'JetBrains Mono',monospace; font-weight:700; text-align:center;">
+            <input type="number" id="inputAmrCount" min="0" max="20" value="5" style="width:55px; font-family:'JetBrains Mono',monospace; font-weight:700; text-align:center;">
             <div style="display:inline-flex; gap:3px;">
-              <button class="btn-sm" onclick="$('inputAmrCount').value=2">2</button>
-              <button class="btn-sm" onclick="$('inputAmrCount').value=4">4</button>
-              <button class="btn-sm" onclick="$('inputAmrCount').value=6">6</button>
-              <button class="btn-sm" onclick="$('inputAmrCount').value=8">8</button>
-              <button class="btn-sm" onclick="$('inputAmrCount').value=12">12</button>
+              <button class="btn-sm" onclick="$('inputAmrCount').value=0">0</button>
+              <button class="btn-sm" onclick="$('inputAmrCount').value=5">5</button>
+              <button class="btn-sm" onclick="$('inputAmrCount').value=10">10</button>
+              <button class="btn-sm" onclick="$('inputAmrCount').value=20">20</button>
             </div>
           </div>
 
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <span style="color:var(--amber); font-weight:900; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;">📦 Tasks / AMR:</span>
-            <input type="number" id="inputTasksPerAmr" min="1" max="20" value="2" style="width:55px; font-family:'JetBrains Mono',monospace; font-weight:700; text-align:center;">
+            <span style="color:var(--amber); font-weight:900; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;">📦 Total Tasks:</span>
+            <input type="number" id="inputTotalTasks" min="0" max="100" value="10" style="width:60px; font-family:'JetBrains Mono',monospace; font-weight:700; text-align:center;">
             <div style="display:inline-flex; gap:3px;">
-              <button class="btn-sm" onclick="$('inputTasksPerAmr').value=1">1</button>
-              <button class="btn-sm" onclick="$('inputTasksPerAmr').value=2">2</button>
-              <button class="btn-sm" onclick="$('inputTasksPerAmr').value=4">4</button>
-              <button class="btn-sm" onclick="$('inputTasksPerAmr').value=8">8</button>
+              <button class="btn-sm" onclick="$('inputTotalTasks').value=0">0</button>
+              <button class="btn-sm" onclick="$('inputTotalTasks').value=10">10</button>
+              <button class="btn-sm" onclick="$('inputTotalTasks').value=50">50</button>
+              <button class="btn-sm" onclick="$('inputTotalTasks').value=100">100</button>
             </div>
           </div>
 
@@ -1793,15 +1804,31 @@
     }
 
     function applyFleetConfig() {
-      const count = parseInt($('inputAmrCount').value) || 5;
-      const tasksPerAmr = parseInt($('inputTasksPerAmr').value) || 2;
+      const rawCount = $('inputAmrCount').value.trim();
+      const rawTasks = $('inputTotalTasks').value.trim();
+      const count = parseInt(rawCount);
+      const tasks = parseInt(rawTasks);
+
+      if (isNaN(count) || count < 0 || count > 20) {
+        alert('Validation Error: AMR count must be between 0 and 20.');
+        return;
+      }
+      if (isNaN(tasks) || tasks < 0 || tasks > 100) {
+        alert('Validation Error: Task count must be between 0 and 100.');
+        return;
+      }
       const policy = $('overviewAllocSelect').value;
-      send('configure_fleet', { robot_count: count, tasks_per_amr: tasksPerAmr, allocation_policy: policy });
+      send('configure_fleet', { robot_count: count, task_count: tasks, allocation_policy: policy });
     }
 
     function dispatchBatchTasks() {
-      const perAmr = parseInt($('inputTasksPerAmr').value) || 2;
-      send('assign_tasks_per_amr', { tasks_per_amr: perAmr });
+      const rawTasks = $('inputTotalTasks').value.trim();
+      const tasks = parseInt(rawTasks);
+      if (isNaN(tasks) || tasks < 0 || tasks > 100) {
+        alert('Validation Error: Task count must be between 0 and 100.');
+        return;
+      }
+      send('create_tasks', { count: tasks });
     }
 
     function setGlobalSpeed(speedVal) {
@@ -2471,11 +2498,56 @@
       renderEvents();
       renderOperationsControls(data);
 
+      // Render Task Order Queue in View 5
+      if ($('tasksInspectionList')) {
+        const tList = data.tasks || [];
+        if (tList.length === 0) {
+          $('tasksInspectionList').innerHTML = '<span style="color:var(--muted); padding:10px;">No tasks queued.</span>';
+        } else {
+          $('tasksInspectionList').innerHTML = tList.map(t => `
+            <div class="event-line" style="justify-content:space-between; cursor:pointer;" onclick="inspectTask('${t.task_id}')">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="badge-task" style="font-weight:700;">${t.task_id}</span>
+                <span style="font-size:11px; color:var(--text); font-weight:600;">(${t.pickup[0]},${t.pickup[1]}) ➔ (${t.destination[0]},${t.destination[1]})</span>
+                <span style="font-size:10px; color:var(--muted);">P${t.priority}</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; font-weight:700; color:${t.status === 'completed' ? 'var(--green)' : t.status === 'in_progress' ? 'var(--cyan)' : 'var(--amber)'};">${t.status}</span>
+                <span style="font-size:10px; color:var(--muted);">${t.assigned_robot || 'Unassigned'}</span>
+              </div>
+            </div>
+          `).join('');
+        }
+      }
+
+      // Render AMR Hardware List in View 5
+      if ($('fleetInspectionList')) {
+        const rList = data.robots || [];
+        if (rList.length === 0) {
+          $('fleetInspectionList').innerHTML = '<span style="color:var(--muted); padding:10px;">0 AMRs spawned.</span>';
+        } else {
+          $('fleetInspectionList').innerHTML = rList.map(r => `
+            <div class="event-line" style="justify-content:space-between; cursor:pointer;" onclick="inspectAMR('${r.robot_id}')">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <strong style="font-size:12px; color:var(--cyan);">${r.robot_id}</strong>
+                <span style="font-size:11px; color:var(--text);">Pos: (${r.position[0]},${r.position[1]})</span>
+                <span style="font-size:11px; color:var(--muted);">Home: (${r.home_position ? r.home_position.join(',') : 'None'})</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; font-weight:700; color:${r.failed ? 'var(--red)' : 'var(--cyan)'};">${r.state}</span>
+                <span style="font-size:11px; font-weight:700;">${Math.round(r.battery)}%</span>
+              </div>
+            </div>
+          `).join('');
+        }
+      }
+
       // 2D Map Grid Rendering (Crisp White + Crystal)
-      const wh = data.warehouse || { width: 18, height: 18, obstacles: [], dynamic_obstacles: [], charging_stations: [] };
+      const wh = data.warehouse || { width: 18, height: 21, obstacles: [], dynamic_obstacles: [], charging_stations: [], home_cells: [] };
       const staticObs = new Set((wh.obstacles || []).map(c => c.join(',')));
       const dynObs = new Set((wh.dynamic_obstacles || []).map(c => c.join(',')));
       const docks = new Set((wh.charging_stations || []).map(c => c.join(',')));
+      const homeBays = new Set((wh.home_cells || []).map(c => c.join(',')));
       const resv = new Set((data.reservations || []).map(r => r.cell.join(',')));
 
       // Map rack cells to rack entities
@@ -2490,6 +2562,7 @@
 
       const map = $('map');
       if (map) {
+        map.style.gridTemplateColumns = `repeat(${wh.width}, 1fr)`;
         map.innerHTML = '';
         for (let y = 0; y < wh.height; y++) {
           for (let x = 0; x < wh.width; x++) {
@@ -2512,6 +2585,9 @@
             } else if (docks.has(key)) {
               cell.classList.add('charging');
               cell.textContent = '⚡';
+            } else if (homeBays.has(key)) {
+              cell.classList.add('home-bay');
+              cell.title = 'AMR Home / Start Station';
             } else if (resv.has(key)) {
               cell.classList.add('reserved');
             } else {

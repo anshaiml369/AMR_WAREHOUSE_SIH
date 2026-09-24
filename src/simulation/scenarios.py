@@ -28,7 +28,7 @@ class ScenarioDefinition:
     expected_demo: str = "Autonomous resolution with 0 collisions and logged reasoning"
 
 
-def build_scenario_warehouse(scenario_id: str = "default", width: int = 18, height: int = 18) -> Warehouse:
+def build_scenario_warehouse(scenario_id: str = "default", width: int = 20, height: int = 23) -> Warehouse:
     """
     Constructs authoritative warehouse geometry tailored to the specific scenario,
     modifying static racks, narrow corridors, and charging stations.
@@ -44,41 +44,57 @@ def build_scenario_warehouse(scenario_id: str = "default", width: int = 18, heig
             warehouse.set_obstacle((x, y))
 
     # Multi-Rack Layout with exactly 2 grid squares of distance between adjacent rack rows
-    # Rack rows placed at y = 2, 5, 8, 11, 14...
-    # Aisles between rows: y=3..4, 6..7, 9..10, 12..13 (each exactly 2 walkable cells wide)
-    # Cross-aisles for 2-AMR turning & passing: x in {8, 9}
+    # Rack rows placed at y = 2, 5, 8, 11, 14, 17...
+    # Aisles between rows: y=3..4, 6..7, 9..10, 12..13, 15..16 (each exactly 2 walkable cells wide)
+    # Cross-aisles for 2-AMR turning & passing: x in {8, 9, 10}
     from src.warehouse.warehouse import Rack
     
-    # Row 1 (y=2): Medium + Small on left, Medium + Small on right
+    # Row 1 (y=2): Medium + Small on left, Medium + Small + Small on right
     warehouse.add_rack(Rack("rack_r1_1", x=2, y=2, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r1_2", x=5, y=2, width=3, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
     warehouse.add_rack(Rack("rack_r1_3", x=10, y=2, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r1_4", x=14, y=2, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+    if width >= 20:
+        warehouse.add_rack(Rack("rack_r1_5", x=16, y=2, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
 
-    # Row 2 (y=5): Large on left, Medium + Medium on right
+    # Row 2 (y=5): Large on left, Medium + Medium + Small on right
     warehouse.add_rack(Rack("rack_r2_1", x=2, y=5, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
     warehouse.add_rack(Rack("rack_r2_2", x=10, y=5, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r2_3", x=13, y=5, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+    if width >= 20:
+        warehouse.add_rack(Rack("rack_r2_4", x=16, y=5, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
 
-    # Row 3 (y=8): Medium + Small on left, Large on right
+    # Row 3 (y=8): Medium + Small on left, Large + Small on right
     warehouse.add_rack(Rack("rack_r3_1", x=2, y=8, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r3_2", x=6, y=8, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
     warehouse.add_rack(Rack("rack_r3_3", x=10, y=8, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
+    if width >= 20:
+        warehouse.add_rack(Rack("rack_r3_4", x=16, y=8, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
 
-    # Row 4 (y=11): Medium + Medium on left, Medium + Small on right
+    # Row 4 (y=11): Medium + Medium on left, Medium + Small + Small on right
     warehouse.add_rack(Rack("rack_r4_1", x=2, y=11, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r4_2", x=5, y=11, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r4_3", x=10, y=11, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
     warehouse.add_rack(Rack("rack_r4_4", x=14, y=11, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+    if width >= 20:
+        warehouse.add_rack(Rack("rack_r4_5", x=16, y=11, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
 
-    # Row 5 (y=14): Large on left, Large on right
+    # Row 5 (y=14): Large on left, Large + Small on right
     warehouse.add_rack(Rack("rack_r5_1", x=2, y=14, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
     warehouse.add_rack(Rack("rack_r5_2", x=10, y=14, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
+    if width >= 20:
+        warehouse.add_rack(Rack("rack_r5_3", x=16, y=14, width=2, height=1, rack_type="small", orientation="horizontal", tiers=2), force=True)
+
+    # Row 6 (y=17): Additional storage racks in expanded warehouse
+    if height >= 23:
+        warehouse.add_rack(Rack("rack_r6_1", x=2, y=17, width=6, height=1, rack_type="large", orientation="horizontal", tiers=4), force=True)
+        warehouse.add_rack(Rack("rack_r6_2", x=10, y=17, width=4, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
+        warehouse.add_rack(Rack("rack_r6_3", x=15, y=17, width=3, height=1, rack_type="medium", orientation="horizontal", tiers=3), force=True)
 
     # Scenario-specific structural geometry
     if scenario_id in {"head_on_conflict", "narrow_aisle"}:
         for x in range(3, width - 3):
-            if x != 8 and x != 9:
+            if x not in {8, 9, 10}:
                 warehouse.set_obstacle((x, 7))
                 warehouse.set_obstacle((x, 9))
     elif scenario_id == "deadlock_cycle":
@@ -98,14 +114,23 @@ def build_scenario_warehouse(scenario_id: str = "default", width: int = 18, heig
                         warehouse.set_obstacle((x, y))
 
     # Charging Stations
+    station_y = height - 5 if height >= 23 else 16
     if scenario_id == "charger_failure":
-        warehouse.add_charging_station((1, 16))
+        warehouse.add_charging_station((1, station_y))
     else:
         warehouse.add_charging_station((1, 1))
-        warehouse.add_charging_station((1, 16))
+        warehouse.add_charging_station((1, station_y))
         if scenario_id == "shift_change_battery_drain":
-            warehouse.add_charging_station((16, 1))
-            warehouse.add_charging_station((16, 16))
+            warehouse.add_charging_station((width - 2, 1))
+            warehouse.add_charging_station((width - 2, station_y))
+
+    # Dedicated starting/home area for AMRs (approximately 2 rows x N columns)
+    if height >= 20:
+        row1 = height - 4  # e.g. 19 when height=23
+        row2 = height - 3  # e.g. 20 when height=23
+        for col in range(2, min(width - 2, 18)):
+            warehouse.home_cells.add((col, row1))
+            warehouse.home_cells.add((col, row2))
 
     return warehouse
 

@@ -84,10 +84,28 @@ class LiveDashboard:
             elif action == "remove_obstacle":
                 self.simulator.remove_obstacle()
             elif action == "create_fleet":
-                self.simulator.create_fleet(int(message.get("count", 5)))
+                raw_c = message.get("count", 5)
+                try:
+                    c = int(raw_c)
+                except (TypeError, ValueError):
+                    c = 5
+                if c < 0 or c > 20:
+                    err_msg = f"Validation Error: AMR count {c} is invalid. Fleet size must be between 0 and 20 AMRs."
+                    self.simulator.metrics.record_event({"type": "validation_rejected", "message": err_msg, "time": self.simulator.time_step})
+                else:
+                    self.simulator.create_fleet(c)
                 self.running = False
             elif action == "create_tasks":
-                self.simulator.create_tasks(int(message.get("count", 10)))
+                raw_c = message.get("count", 10)
+                try:
+                    c = int(raw_c)
+                except (TypeError, ValueError):
+                    c = 10
+                if c < 0 or c > 100:
+                    err_msg = f"Validation Error: Task count {c} is invalid. Workload must be between 0 and 100 tasks."
+                    self.simulator.metrics.record_event({"type": "validation_rejected", "message": err_msg, "time": self.simulator.time_step})
+                else:
+                    self.simulator.create_tasks(c)
                 self.running = False
             elif action == "execute_tasks":
                 self.simulator.execute_tasks()
@@ -201,12 +219,43 @@ class LiveDashboard:
                 self.speed = 0.22 / multiplier
                 self.simulator.metrics.record_event({"type": "global_speed_updated", "speed": speed_val, "time": self.simulator.time_step})
             elif action == "configure_fleet":
-                r_count = max(1, min(int(message.get("robot_count", message.get("count", 5))), 20))
-                t_count = max(1, min(int(message.get("task_count", message.get("tasks", 10))), 100))
-                tasks_per_amr = message.get("tasks_per_amr")
-                if tasks_per_amr is not None:
-                    t_count = max(t_count, int(tasks_per_amr) * r_count)
-                
+                raw_r = message.get("robot_count", message.get("count", 5))
+                raw_t = message.get("task_count", message.get("tasks", 10))
+                try:
+                    r_count = int(raw_r)
+                except (TypeError, ValueError):
+                    r_count = 5
+                try:
+                    t_count = int(raw_t)
+                except (TypeError, ValueError):
+                    t_count = 10
+
+                if r_count < 0 or r_count > 20:
+                    err_msg = f"Validation Error: AMR count {r_count} is invalid. Fleet size must be between 0 and 20 AMRs."
+                    self.simulator.metrics.record_event({"type": "validation_rejected", "message": err_msg, "time": self.simulator.time_step})
+                    self.simulator.decision_logger.log(
+                        decision_type="VALIDATION_REJECTED",
+                        category="FLEET_CONFIG",
+                        problem=f"Requested AMR count {r_count} outside 0-20 limits",
+                        reason=err_msg,
+                        outcome="Fleet configuration blocked",
+                        timestamp=self.simulator.time_step,
+                    )
+                    return
+
+                if t_count < 0 or t_count > 100:
+                    err_msg = f"Validation Error: Task count {t_count} is invalid. Workload must be between 0 and 100 tasks."
+                    self.simulator.metrics.record_event({"type": "validation_rejected", "message": err_msg, "time": self.simulator.time_step})
+                    self.simulator.decision_logger.log(
+                        decision_type="VALIDATION_REJECTED",
+                        category="TASK_CONFIG",
+                        problem=f"Requested task count {t_count} outside 0-100 limits",
+                        reason=err_msg,
+                        outcome="Task configuration blocked",
+                        timestamp=self.simulator.time_step,
+                    )
+                    return
+
                 speed_val = float(message.get("speed", 1.0))
                 self.simulator = DecentralizedFleetSimulator(
                     build_scenario_warehouse(self.scenario),
@@ -215,15 +264,11 @@ class LiveDashboard:
                 self.simulator.initialize(create_tasks=True)
                 for r in self.simulator.robots.values():
                     r.speed_multiplier = speed_val
-                
-                if tasks_per_amr is not None:
-                    targets = {rid: int(tasks_per_amr) for rid in self.simulator.robots}
-                    self.simulator.set_task_allocation("hybrid", targets, "Configured custom tasks per AMR")
-                
-                alloc_policy = message.get("allocation_policy")
+
+                alloc_policy = message.get("allocation_policy", "automatic")
                 if alloc_policy:
                     self.simulator.allocation_policy.set_mode(str(alloc_policy).lower())
-                
+
                 self.running = False
                 self.simulator.metrics.record_event({
                     "type": "fleet_configured",
@@ -308,7 +353,7 @@ class LiveDashboard:
                 self.simulator.step()
 
 
-def build_demo_warehouse(scenario: str = "default", width: int = 18, height: int = 18) -> Warehouse:
+def build_demo_warehouse(scenario: str = "default", width: int = 20, height: int = 23) -> Warehouse:
     return build_scenario_warehouse(scenario, width, height)
 
 

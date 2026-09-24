@@ -35,6 +35,11 @@ class Rack:
     def span_y(self) -> int:
         return self.height if self.orientation == "horizontal" else self.width
 
+    @property
+    def capacity(self) -> int:
+        """Total storage capacity slots of the rack based on footprint and tiers."""
+        return len(self.occupied_cells()) * self.tiers * 2
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.rack_id,
@@ -48,6 +53,7 @@ class Rack:
             "rack_type": self.rack_type,
             "orientation": self.orientation,
             "tiers": self.tiers,
+            "capacity": self.capacity,
             "cells": [list(c) for c in sorted(self.occupied_cells())],
             "metadata": self.metadata,
         }
@@ -58,13 +64,14 @@ class Warehouse:
     """Authoritative 2D warehouse spatial & navigation geometry model."""
 
     width: int = 20
-    height: int = 20
+    height: int = 23
     static_obstacles: set[tuple[int, int]] = field(default_factory=set)
     dynamic_obstacles: set[tuple[int, int]] = field(default_factory=set)
     pickup_points: set[tuple[int, int]] = field(default_factory=set)
     delivery_points: set[tuple[int, int]] = field(default_factory=set)
     charging_stations: set[tuple[int, int]] = field(default_factory=set)
     corridor_cells: set[tuple[int, int]] = field(default_factory=set)
+    home_cells: set[tuple[int, int]] = field(default_factory=set)
     racks: dict[str, Rack] = field(default_factory=dict)
     explicit_obstacles: set[tuple[int, int]] = field(default_factory=set)
 
@@ -80,6 +87,10 @@ class Warehouse:
     @property
     def obstacles(self) -> set[tuple[int, int]]:
         return self.static_obstacles | self.dynamic_obstacles
+
+    @property
+    def total_storage_capacity(self) -> int:
+        return sum(rack.capacity for rack in self.racks.values())
 
     @property
     def bounds(self) -> tuple[int, int]:
@@ -331,9 +342,11 @@ class Warehouse:
             "obstacles": [list(cell) for cell in sorted(self.static_obstacles)],
             "dynamic_obstacles": [list(cell) for cell in sorted(self.dynamic_obstacles)],
             "charging_stations": [list(cell) for cell in sorted(self.charging_stations)],
+            "home_cells": [list(cell) for cell in sorted(self.home_cells)],
             "pickup_points": [list(cell) for cell in sorted(self.pickup_points)],
             "delivery_points": [list(cell) for cell in sorted(self.delivery_points)],
             "racks": [rack.to_dict() for rack in self.racks.values()],
+            "total_storage_capacity": self.total_storage_capacity,
         }
 
     def __contains__(self, item: tuple[int, int]) -> bool:
