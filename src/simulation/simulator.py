@@ -31,6 +31,7 @@ from src.coordination.allocation import TaskAllocationPolicy, AllocationMode
 from src.tasks.package import Package
 from src.tasks.task import Task
 from src.warehouse.warehouse import Warehouse
+from src.safety.supervisor import SafetySupervisor, SafetyZoneState, SafetyRegion
 
 
 @dataclass
@@ -100,6 +101,7 @@ class BaseFleetSimulator:
         self.scenario_registry = ScenarioRegistry()
         self.priority_evaluator = PriorityEvaluator()
         self.incident_manager = IncidentManager()
+        self.safety_supervisor = SafetySupervisor()
         self.operator_actions: list[dict[str, Any]] = []
         self.allocation_policy = TaskAllocationPolicy(AllocationMode.HYBRID)
         self.global_speed_multiplier: float = 1.0
@@ -1081,7 +1083,17 @@ class BaseFleetSimulator:
                         robot.returning_home = False
                         continue
                     if robot.home_position and robot.position != robot.home_position:
-                        robot.movement_accumulator += (robot.speed_multiplier * self.global_speed_multiplier)
+                        next_c = robot.current_path[1] if robot.current_path and len(robot.current_path) > 1 else None
+                        z_state, s_factor, s_reason = self.safety_supervisor.evaluate_robot_safety(robot.position, next_c)
+                        if z_state == SafetyZoneState.STOP:
+                            robot.state = "SAFETY_STOP"
+                            continue
+                        elif z_state == SafetyZoneState.RESTRICTED:
+                            restricted_cells = {c for reg in self.safety_supervisor.regions.values() if reg.state == SafetyZoneState.RESTRICTED for c in reg.cells}
+                            if robot.current_path and any(c in restricted_cells for c in robot.current_path):
+                                self._plan_path_for_robot(robot, extra_blocked=restricted_cells)
+
+                        robot.movement_accumulator += (robot.speed_multiplier * self.global_speed_multiplier * s_factor)
                         steps_budget = int(robot.movement_accumulator)
                         robot.movement_accumulator -= steps_budget
                         if steps_budget >= 1:
@@ -1115,7 +1127,19 @@ class BaseFleetSimulator:
                     robot.state = "IDLE"
                 continue
 
-            robot.movement_accumulator += (robot.speed_multiplier * self.global_speed_multiplier)
+            next_c = robot.current_path[1] if robot.current_path and len(robot.current_path) > 1 else None
+            z_state, s_factor, s_reason = self.safety_supervisor.evaluate_robot_safety(robot.position, next_c)
+            if z_state == SafetyZoneState.STOP:
+                robot.state = "SAFETY_STOP"
+                self.metrics.record_event({"type": "safety_stop", "robot": robot.robot_id, "reason": s_reason, "time": self.time_step})
+                continue
+            elif z_state == SafetyZoneState.RESTRICTED:
+                restricted_cells = {c for reg in self.safety_supervisor.regions.values() if reg.state == SafetyZoneState.RESTRICTED for c in reg.cells}
+                if robot.current_path and any(c in restricted_cells for c in robot.current_path):
+                    self._plan_path_for_robot(robot, extra_blocked=restricted_cells)
+                    self.metrics.record_event({"type": "safety_restricted_reroute", "robot": robot.robot_id, "reason": s_reason, "time": self.time_step})
+
+            robot.movement_accumulator += (robot.speed_multiplier * self.global_speed_multiplier * s_factor)
             steps_budget = int(robot.movement_accumulator)
             robot.movement_accumulator -= steps_budget
 
@@ -2225,6 +2249,7 @@ class BaseFleetSimulator:
             "decisions": self.decision_logger.get_recent(25),
             "latest_decision": latest_decision,
             "recovery_history": [r.to_dict() for r in self.recovery_engine.recovery_history[-10:]],
+            "safety": self.safety_supervisor.to_dict(),
             "active_scenario": self.active_scenario,
             "scenarios": self.scenario_registry.list_scenarios(),
             "incidents": self.incident_manager.to_list(),
