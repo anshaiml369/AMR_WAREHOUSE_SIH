@@ -571,9 +571,9 @@ class DigitalTwin3D {
       const ring = mesh.userData.statusRing;
       if (ring) {
         let colorHex = 0x0284c7; // Idle crystal blue
-        if (r.failed || r.state === 'FAILED') colorHex = 0xef4444; // Red
+        if (r.failed || r.state === 'FAILED' || r.state === 'NO_FEASIBLE_ROUTE') colorHex = 0xef4444; // Red
         else if (r.state.startsWith('DOCK') || r.state === 'CHARGING') colorHex = 0x10b981; // Green
-        else if (r.state === 'WAITING' || r.state === 'NEGOTIATING') colorHex = 0xf59e0b; // Amber
+        else if (r.state === 'WAITING' || r.state === 'NEGOTIATING' || r.state === 'TEMPORARILY_BLOCKED') colorHex = 0xf59e0b; // Amber
         else if (r.carrying_package_id) colorHex = 0x0284c7; // Blue
         else if (r.state.startsWith('MOVING')) colorHex = 0x10b981; // Emerald
         ring.material.color.setHex(colorHex);

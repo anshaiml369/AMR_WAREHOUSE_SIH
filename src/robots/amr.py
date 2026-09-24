@@ -45,6 +45,9 @@ class AMRRobot:
     movement_accumulator: float = 0.0
     target_tasks: int = 0
     assigned_tasks_count: int = 0
+    blocked_count: int = 0
+    replanning_retries: int = 0
+    max_replanning_retries: int = 5
 
     def set_position(self, pos: tuple[int, int]) -> None:
         self.position = pos
@@ -98,4 +101,6 @@ class AMRRobot:
             "effective_speed": round(self.speed_multiplier, 2),
             "target_tasks": self.target_tasks,
             "assigned_tasks_count": self.assigned_tasks_count,
+            "blocked_count": self.blocked_count,
+            "replanning_retries": self.replanning_retries,
         }

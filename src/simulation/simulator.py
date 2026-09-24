@@ -467,6 +467,24 @@ class BaseFleetSimulator:
             path = a_star(robot.position, target, self.warehouse, extra_blocked)
         robot.current_path = path
         robot.current_waypoint = 0
+        if len(path) <= 1 and robot.position != target:
+            robot.replanning_retries += 1
+            if robot.replanning_retries >= robot.max_replanning_retries:
+                robot.state = "NO_FEASIBLE_ROUTE"
+                self.incident_manager.raise_incident(
+                    incident_type="NO_FEASIBLE_ROUTE",
+                    severity=IncidentSeverity.MEDIUM,
+                    timestamp=self.time_step,
+                    affected_entities={"robots": [robot.robot_id]},
+                    detected_by="PathPlanner",
+                    decision=f"No feasible route to target {target} after {robot.replanning_retries} attempts",
+                )
+            else:
+                if robot.state not in {"FAILED", "PAUSED"}:
+                    robot.state = "TEMPORARILY_BLOCKED"
+        else:
+            if robot.state in {"TEMPORARILY_BLOCKED", "NO_FEASIBLE_ROUTE"}:
+                robot.replanning_retries = 0
         self.metrics.record_event({"type": "path_planned", "robot": robot.robot_id, "goal": target, "time": self.time_step})
         return path
 
@@ -642,17 +660,19 @@ class BaseFleetSimulator:
     def _move_robot(self, robot: AMRRobot, target_cell: tuple[int, int]) -> bool:
         if not self.warehouse.is_walkable(target_cell):
             self.metrics.prevented_conflicts += 1
-            robot.state = "BLOCKED"
+            robot.state = "TEMPORARILY_BLOCKED"
             robot.obstacle_status = "BLOCKED"
             robot.waiting_time += 1
+            robot.blocked_count += 1
             self.metrics.record_event({"type": "obstacle_detected", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             return False
         positions = {rid: r.position for rid, r in self.robots.items() if rid != robot.robot_id}
         if ConflictDetector.detect_vertex_conflict({robot.robot_id: target_cell, **positions}):
             self.metrics.prevented_conflicts += 1
             robot.collision_status = "PREVENTED_CONFLICT"
-            robot.state = "NEGOTIATING"
+            robot.state = "TEMPORARILY_BLOCKED"
             robot.waiting_time += 1
+            robot.blocked_count += 1
             blocking_id = next((rid for rid, pos in positions.items() if pos == target_cell), None)
             if blocking_id:
                 self.wait_for_graph.add_wait(robot.robot_id, blocking_id)
@@ -667,8 +687,9 @@ class BaseFleetSimulator:
                     winner, loser, reason = NegotiationProtocol.negotiate_conflict(robot.robot_id, peer.robot_id, bid_r, bid_p)
                     self.metrics.record_event({"type": "p2p_negotiation_resolved", "winner": winner, "loser": loser, "reason": reason, "time": self.time_step})
 
-                    is_head_on = bool(peer.current_path and len(peer.current_path) > 1 and peer.current_path[1] == robot.position)
+                    is_head_on = bool(peer.current_path and len(peer.current_path) > 1 and peer.current_path[1] == robot.position) or self.wait_for_graph.detect_head_on(robot.robot_id, peer.robot_id)
                     if (is_head_on or robot.waiting_time >= 2) and loser == robot.robot_id:
+                        robot.replanning_retries += 1
                         alt_path = a_star(robot.position, robot.current_goal, self.warehouse, blocked=set(positions.values()) | {target_cell})
                         if len(alt_path) > 1:
                             robot.current_path = alt_path
@@ -676,6 +697,17 @@ class BaseFleetSimulator:
                             robot.waiting_time = 0
                             self.metrics.replanning_events += 1
                             self.metrics.record_event({"type": "route_replanned", "robot": robot.robot_id, "time": self.time_step})
+                            return False
+                        elif robot.replanning_retries >= robot.max_replanning_retries:
+                            robot.state = "NO_FEASIBLE_ROUTE"
+                            self.incident_manager.raise_incident(
+                                incident_type="NO_FEASIBLE_ROUTE",
+                                severity=IncidentSeverity.MEDIUM,
+                                timestamp=self.time_step,
+                                affected_entities={"robots": [robot.robot_id]},
+                                detected_by="PathPlanner",
+                                decision=f"Robot {robot.robot_id} exhausted {robot.max_replanning_retries} replan retries",
+                            )
                             return False
                         all_pos = set(positions.values()) | {robot.position}
                         for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
@@ -692,11 +724,14 @@ class BaseFleetSimulator:
                                 return False
             self.metrics.record_event({"type": "conflict_detected", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             self.metrics.record_event({"type": "collision_prevented", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
-            robot.state = "WAITING"
+            if robot.state != "NO_FEASIBLE_ROUTE":
+                robot.state = "TEMPORARILY_BLOCKED" if robot.waiting_time >= 1 else "WAITING"
             return False
         if not self.reservation_table.reserve(robot.robot_id, target_cell, self.time_step):
             self.metrics.prevented_conflicts += 1
-            robot.state = "NEGOTIATING"
+            robot.state = "TEMPORARILY_BLOCKED"
+            robot.waiting_time += 1
+            robot.blocked_count += 1
             reserved_by = self.reservation_table._vertex.get(target_cell, {}).get(self.time_step)
             if reserved_by and reserved_by != robot.robot_id:
                 self.wait_for_graph.add_wait(robot.robot_id, reserved_by)
@@ -704,7 +739,9 @@ class BaseFleetSimulator:
             return False
         if not self.reservation_table.reserve_edge(robot.robot_id, robot.position, target_cell, self.time_step):
             self.metrics.prevented_conflicts += 1
-            robot.state = "WAITING"
+            robot.state = "TEMPORARILY_BLOCKED"
+            robot.waiting_time += 1
+            robot.blocked_count += 1
             return False
         prior = robot.position
         robot.position = target_cell
@@ -720,6 +757,8 @@ class BaseFleetSimulator:
         self.metrics.record_event({"type": "move", "robot": robot.robot_id, "from": prior, "to": target_cell, "time": self.time_step})
         robot.state = "MOVING"
         robot.waiting_time = 0
+        robot.blocked_count = 0
+        robot.replanning_retries = 0
         return True
 
     @staticmethod
@@ -970,30 +1009,56 @@ class BaseFleetSimulator:
                             self._deliver_package(robot, task)
                             break
                     elif robot.waiting_time >= 4:
-                        robot.state = "REROUTING"
-                        robot.current_path = []
-                        robot.waiting_time = 0
-                        self.metrics.deadlocks += 1
-                        self.metrics.replanning_events += 1
-                        self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
-                        self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
-                        self._plan_path_for_robot(robot, extra_blocked={next_cell})
+                        robot.replanning_retries += 1
+                        if robot.replanning_retries >= robot.max_replanning_retries:
+                            robot.state = "NO_FEASIBLE_ROUTE"
+                            self.incident_manager.raise_incident(
+                                incident_type="NO_FEASIBLE_ROUTE",
+                                severity=IncidentSeverity.MEDIUM,
+                                timestamp=self.time_step,
+                                affected_entities={"robots": [robot.robot_id]},
+                                detected_by="PathPlanner",
+                                decision=f"Robot {robot.robot_id} exceeded replanning retry limit ({robot.max_replanning_retries})",
+                            )
+                        else:
+                            robot.state = "REROUTING"
+                            robot.current_path = []
+                            robot.waiting_time = 0
+                            self.metrics.deadlocks += 1
+                            self.metrics.replanning_events += 1
+                            self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
+                            self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                            self._plan_path_for_robot(robot, extra_blocked={next_cell})
                         break
                     else:
                         break
                 else:
-                    robot.state = "WAITING"
+                    if robot.state != "NO_FEASIBLE_ROUTE":
+                        robot.state = "TEMPORARILY_BLOCKED" if robot.waiting_time >= 1 else "WAITING"
                     self.metrics.waiting_time += 1
                     robot.waiting_time += 1
+                    robot.blocked_count += 1
                     if robot.waiting_time >= 4:
-                        robot.state = "REROUTING"
-                        robot.current_path = []
-                        robot.waiting_time = 0
-                        self.metrics.deadlocks += 1
-                        self.metrics.replanning_events += 1
-                        self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
-                        self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
-                        self._plan_path_for_robot(robot)
+                        robot.replanning_retries += 1
+                        if robot.replanning_retries >= robot.max_replanning_retries:
+                            robot.state = "NO_FEASIBLE_ROUTE"
+                            self.incident_manager.raise_incident(
+                                incident_type="NO_FEASIBLE_ROUTE",
+                                severity=IncidentSeverity.MEDIUM,
+                                timestamp=self.time_step,
+                                affected_entities={"robots": [robot.robot_id]},
+                                detected_by="PathPlanner",
+                                decision=f"Robot {robot.robot_id} exceeded replanning retry limit ({robot.max_replanning_retries})",
+                            )
+                        else:
+                            robot.state = "REROUTING"
+                            robot.current_path = []
+                            robot.waiting_time = 0
+                            self.metrics.deadlocks += 1
+                            self.metrics.replanning_events += 1
+                            self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
+                            self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
+                            self._plan_path_for_robot(robot)
                     break
 
         # Graph-theoretic Wait-For Graph (WFG) cycle detection & breaking
@@ -1105,16 +1170,23 @@ class BaseFleetSimulator:
                 conceding_robot.state = "REROUTING"
                 conceding_robot.current_path = []
                 conceding_robot.waiting_time = 0
+                conceding_robot.blocked_count = 0
                 blocked = {other_robot.position} if other_robot else None
                 self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
                 outcome_desc = f"{conceding_robot.robot_id} evacuated corridor into buffer cell {evac_cell}"
             else:
+                conceding_robot.replanning_retries += 1
                 blocked = {other_robot.position} if other_robot else None
-                conceding_robot.state = "REROUTING"
-                conceding_robot.current_path = []
-                conceding_robot.waiting_time = 0
-                self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
-                outcome_desc = f"{conceding_robot.robot_id} rerouted path avoiding conflict zone"
+                if conceding_robot.replanning_retries >= conceding_robot.max_replanning_retries:
+                    conceding_robot.state = "NO_FEASIBLE_ROUTE"
+                    outcome_desc = f"{conceding_robot.robot_id} reached max replanning retries (NO_FEASIBLE_ROUTE)"
+                else:
+                    conceding_robot.state = "REROUTING"
+                    conceding_robot.current_path = []
+                    conceding_robot.waiting_time = 0
+                    conceding_robot.blocked_count = 0
+                    self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
+                    outcome_desc = f"{conceding_robot.robot_id} rerouted path avoiding conflict zone"
 
             self.metrics.replanning_events += 1
             scores_detail = ", ".join(f"{r.robot_id}: {s:.1f} ({ev.priority_class.name})" for s, ev, r in scored)
@@ -1126,6 +1198,14 @@ class BaseFleetSimulator:
                 outcome=outcome_desc,
                 timestamp=self.time_step,
                 affected_robots=[r.robot_id for r in cycle_robots],
+            )
+            self.incident_manager.raise_incident(
+                incident_type="DEADLOCK_CYCLE_BROKEN",
+                severity=IncidentSeverity.HIGH,
+                timestamp=self.time_step,
+                affected_entities={"robots": [r.robot_id for r in cycle_robots]},
+                detected_by="WFG_Arbitrator",
+                decision=f"{conceding_robot.robot_id} yielded (score {min_score:.1f}). {outcome_desc}",
             )
             self.metrics.record_event({
                 "type": "deadlock_cycle_broken",

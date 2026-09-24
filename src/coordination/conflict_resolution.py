@@ -97,6 +97,29 @@ class WaitForGraph:
     def as_edge_list(self) -> list[list[str]]:
         return [[u, v] for u, neighbors in sorted(self.edges.items()) for v in sorted(neighbors)]
 
+    def detect_head_on(self, robot_a: str, robot_b: str) -> bool:
+        """Returns True if robot_a is waiting on robot_b and robot_b is waiting on robot_a."""
+        return robot_b in self.edges.get(robot_a, set()) and robot_a in self.edges.get(robot_b, set())
+
+    def find_waiting_chains(self, min_length: int = 3) -> list[list[str]]:
+        """Finds long linear wait chains (e.g. A -> B -> C) to identify corridor bottlenecks."""
+        chains: list[list[str]] = []
+        for start_node in sorted(self.edges.keys()):
+            stack = [[start_node]]
+            while stack:
+                curr_path = stack.pop()
+                last = curr_path[-1]
+                neighbors = sorted(self.edges.get(last, set()))
+                extended = False
+                for nxt in neighbors:
+                    if nxt not in curr_path:
+                        extended = True
+                        new_path = curr_path + [nxt]
+                        stack.append(new_path)
+                        if len(new_path) >= min_length and new_path not in chains:
+                            chains.append(new_path)
+        return chains
+
 
 
 from src.coordination.priority import PriorityEvaluator, PriorityEvaluation
