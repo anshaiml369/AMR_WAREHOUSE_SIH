@@ -1683,17 +1683,32 @@ class BaseFleetSimulator:
             pkg.carried_by_robot = None
             robot.carrying_package_id = None
 
-        if failed_task_id and failed_task_id in self.tasks:
-            task = self.tasks[failed_task_id]
+        self.reservation_table.release(robot_id)
+
+        # Collect ALL unfinished tasks assigned to this failed robot (active task + queue)
+        unfinished_tasks = [
+            t for t in self.tasks.values()
+            if t.assigned_robot == robot_id and t.status != "completed"
+        ]
+        for task in unfinished_tasks:
             task.status = "pending"
             task.assigned_robot = None
             task.reassignment_count += 1
             task.reassigned_from.append(robot.robot_id)
-            if dropped_pkg_id:
+            if task.task_id == failed_task_id and dropped_pkg_id:
                 task.pickup = robot.position
-            robot.current_task = None
-            robot.current_goal = None
-            robot.current_path = []
+            task.allocation_reason = f"reassigned_after_failure: {robot_id} ({reason})"
+            self.metrics.record_event({
+                "type": "task_reassigned",
+                "task": task.task_id,
+                "from_robot": robot_id,
+                "reason": f"amr_failure: {reason}",
+                "time": self.time_step,
+            })
+
+        robot.current_task = None
+        robot.current_goal = None
+        robot.current_path = []
 
         available = [r.robot_id for r in self.robots.values() if not r.failed and r.robot_id != robot_id]
         redistributed = self.allocation_policy.reallocate_on_failure(robot_id, available)
@@ -1701,7 +1716,30 @@ class BaseFleetSimulator:
             if rid in self.robots:
                 self.robots[rid].target_tasks += added
 
+        self.incident_manager.raise_incident(
+            incident_type="AMR_FAILURE",
+            severity=IncidentSeverity.CRITICAL,
+            timestamp=self.time_step,
+            affected_entities={"robots": [robot_id], "tasks": [t.task_id for t in unfinished_tasks]},
+            detected_by="HardwareMonitor",
+            decision=f"AMR {robot_id} failed: {reason}. {len(unfinished_tasks)} tasks returned to pool for reassignment.",
+        )
+        self.decision_logger.log_decision(
+            timestamp=self.time_step,
+            category="TASK_REASSIGNMENT",
+            problem=f"Hardware failure on AMR {robot_id} ({reason})",
+            decision=f"Isolated AMR {robot_id}, returned {len(unfinished_tasks)} unfinished tasks to fleet scheduler",
+            reason=f"Robot {robot_id} offline; task reassignment triggered to preserve workload",
+            participants=[robot_id] + available[:2],
+            action="Reservations cleared, cargo secured, tasks re-queued",
+            result=f"{len(unfinished_tasks)} tasks queued for reassignment across {len(available)} available AMRs",
+        )
+
         self.metrics.record_event({"type": "amr_failed", "robot": robot_id, "reason": reason, "time": self.time_step})
+
+        if self.task_execution_active:
+            self._assign_unassigned_tasks()
+
         return True
 
     def operator_resume_robot(self, robot_id: str, reason: str = "Operator manual resume") -> bool:
