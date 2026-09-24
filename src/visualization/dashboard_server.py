@@ -588,6 +588,48 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(payload).encode("utf-8"))
             return
 
+        if clean_path.startswith("/api/wms/orders"):
+            query = parse_qs(urlsplit(self.path).query)
+            order_id = query.get("order_id", [None])[0]
+            with LIVE.lock:
+                if order_id:
+                    res = LIVE.simulator.wms_gateway.get_order_status(order_id)
+                    status_code = 200 if res is not None else 404
+                    payload = {"order": res} if res else {"error": "Order not found"}
+                else:
+                    payload = LIVE.simulator.wms_gateway.to_dict()
+                    status_code = 200
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
+            return
+
+        if clean_path.startswith("/api/wms/amrs"):
+            query = parse_qs(urlsplit(self.path).query)
+            robot_id = query.get("robot_id", [None])[0]
+            with LIVE.lock:
+                amr_data = LIVE.simulator.wms_gateway.get_amr_status(robot_id)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"amrs": amr_data}).encode("utf-8"))
+            return
+
+        if clean_path.startswith("/api/wms/events"):
+            query = parse_qs(urlsplit(self.path).query)
+            limit = int(query.get("limit", ["50"])[0])
+            with LIVE.lock:
+                evs = LIVE.simulator.wms_gateway.get_completion_and_failure_events(limit=limit)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"events": evs}).encode("utf-8"))
+            return
+
         if clean_path in {"/api/state", "/api/metrics"}:
             payload = LIVE.payload()
             self.send_response(200)
@@ -730,6 +772,37 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(json.dumps({"success": ok, "message": msg}).encode("utf-8"))
+            return
+
+        if self.path.startswith("/api/wms/orders"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                data = {}
+            sku = str(data.get("sku", "SKU-GENERIC"))
+            p_raw = data.get("pickup", [0, 0])
+            d_raw = data.get("dropoff", [1, 1])
+            pickup = (int(p_raw[0]), int(p_raw[1]))
+            dropoff = (int(d_raw[0]), int(d_raw[1]))
+            qty = int(data.get("quantity", 1))
+            priority = int(data.get("priority", 1))
+            ext_ref = str(data.get("external_ref", ""))
+            with LIVE.lock:
+                ok, msg, order_dict = LIVE.simulator.wms_gateway.submit_order(
+                    item_sku=sku,
+                    pickup_location=pickup,
+                    dropoff_location=dropoff,
+                    quantity=qty,
+                    priority=priority,
+                    external_reference=ext_ref,
+                )
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg, "order": order_dict}).encode("utf-8"))
             return
 
         self.send_response(404)

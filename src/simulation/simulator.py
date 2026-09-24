@@ -32,6 +32,7 @@ from src.tasks.package import Package
 from src.tasks.task import Task
 from src.warehouse.warehouse import Warehouse
 from src.safety.supervisor import SafetySupervisor, SafetyZoneState, SafetyRegion
+from src.wms.mock_wms import MockWMSGateway
 
 
 @dataclass
@@ -102,6 +103,7 @@ class BaseFleetSimulator:
         self.priority_evaluator = PriorityEvaluator()
         self.incident_manager = IncidentManager()
         self.safety_supervisor = SafetySupervisor()
+        self.wms_gateway = MockWMSGateway(self)
         self.operator_actions: list[dict[str, Any]] = []
         self.allocation_policy = TaskAllocationPolicy(AllocationMode.HYBRID)
         self.global_speed_multiplier: float = 1.0
@@ -2250,6 +2252,7 @@ class BaseFleetSimulator:
             "latest_decision": latest_decision,
             "recovery_history": [r.to_dict() for r in self.recovery_engine.recovery_history[-10:]],
             "safety": self.safety_supervisor.to_dict(),
+            "wms": self.wms_gateway.to_dict(),
             "active_scenario": self.active_scenario,
             "scenarios": self.scenario_registry.list_scenarios(),
             "incidents": self.incident_manager.to_list(),
