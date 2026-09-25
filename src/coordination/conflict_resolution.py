@@ -135,8 +135,9 @@ class NegotiationProtocol:
         return cls._evaluator
 
     @staticmethod
-    def compute_priority_bid(carrying_package: bool, task_priority: int, battery: float, distance_to_goal: int = 0) -> float:
-        bid = (100.0 if carrying_package else 0.0) + (task_priority * 20.0) + (battery * 0.1) - (distance_to_goal * 0.5)
+    def compute_priority_bid(carrying_package: bool, task_priority: int, battery: float, distance_to_goal: int = 0, is_charging: bool = False) -> float:
+        charging_bonus = 50.0 if (is_charging or (battery < 35.0 and is_charging)) else 0.0
+        bid = (100.0 if carrying_package else 0.0) + (task_priority * 20.0) + (battery * 0.1) - (distance_to_goal * 0.5) + charging_bonus
         return round(bid, 2)
 
     @staticmethod

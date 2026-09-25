@@ -46,7 +46,7 @@ class SimulationConfig:
     congestion: float = 0.3
     map_name: str = "default"
     continuous_dispatch: bool = False
-    low_battery_threshold: float = 25.0
+    low_battery_threshold: float = 35.0
     charge_recovery_threshold: float = 85.0
 
     def __post_init__(self) -> None:
@@ -256,6 +256,8 @@ class BaseFleetSimulator:
         """
         if robot.current_task is not None:
             return True
+        if robot.battery < self.config.low_battery_threshold:
+            return False
         pending = [
             t for t in self.tasks.values()
             if t.assigned_robot == robot.robot_id and t.status in {"pending", "queued"}
@@ -562,6 +564,17 @@ class BaseFleetSimulator:
         else:
             if robot.state in {"TEMPORARILY_BLOCKED", "NO_FEASIBLE_ROUTE"}:
                 robot.replanning_retries = 0
+                if robot.carrying_package_id:
+                    robot.state = "MOVING_TO_DROPOFF"
+                elif robot.current_task:
+                    robot.state = "MOVING_TO_PICKUP"
+                elif robot.assigned_dock:
+                    robot.state = "RETURNING_TO_CHARGE"
+                elif robot.returning_home:
+                    robot.state = "RETURNING_HOME"
+                else:
+                    robot.state = "MOVING"
+        self.reservation_table.release(robot.robot_id)
         self.metrics.record_event({"type": "path_planned", "robot": robot.robot_id, "goal": target, "time": self.time_step})
         return path
 
@@ -761,33 +774,30 @@ class BaseFleetSimulator:
                     peer.negotiating_with = robot.robot_id
                     task_r = self.tasks.get(robot.current_task) if robot.current_task else None
                     task_p = self.tasks.get(peer.current_task) if peer.current_task else None
-                    bid_r = NegotiationProtocol.compute_priority_bid(bool(robot.carrying_package_id), task_r.priority if task_r else 1, robot.battery, len(robot.current_path))
-                    bid_p = NegotiationProtocol.compute_priority_bid(bool(peer.carrying_package_id), task_p.priority if task_p else 1, peer.battery, len(peer.current_path))
+                    is_charging_r = robot.state in {"RETURNING_TO_CHARGE", "CHARGING", "DOCKED_CHARGING"} or robot.assigned_dock is not None
+                    is_charging_p = peer.state in {"RETURNING_TO_CHARGE", "CHARGING", "DOCKED_CHARGING"} or peer.assigned_dock is not None
+                    bid_r = NegotiationProtocol.compute_priority_bid(bool(robot.carrying_package_id), task_r.priority if task_r else 1, robot.battery, len(robot.current_path), is_charging=is_charging_r)
+                    bid_p = NegotiationProtocol.compute_priority_bid(bool(peer.carrying_package_id), task_p.priority if task_p else 1, peer.battery, len(peer.current_path), is_charging=is_charging_p)
                     winner, loser, reason = NegotiationProtocol.negotiate_conflict(robot.robot_id, peer.robot_id, bid_r, bid_p)
                     self.metrics.record_event({"type": "p2p_negotiation_resolved", "winner": winner, "loser": loser, "reason": reason, "time": self.time_step})
 
+                    peer_stationary = peer.failed or peer.state in {"CHARGING", "DOCKED_CHARGING", "SAFETY_STOP", "PAUSED"} or (peer.assigned_dock is not None and peer.assigned_dock == peer.position)
                     is_head_on = bool(peer.current_path and len(peer.current_path) > 1 and peer.current_path[1] == robot.position) or self.wait_for_graph.detect_head_on(robot.robot_id, peer.robot_id)
-                    if (is_head_on or robot.waiting_time >= 2) and loser == robot.robot_id:
-                        robot.replanning_retries += 1
-                        alt_path = a_star(robot.position, robot.current_goal, self.warehouse, blocked=set(positions.values()) | {target_cell})
+
+                    # If peer is stationary, head-on, or waiting persisted: replan an alternate path
+                    if (peer_stationary or is_head_on or robot.waiting_time >= 2) and (loser == robot.robot_id or peer_stationary or is_head_on):
+                        hard_blocked = {target_cell} | {p.position for p in self.robots.values() if p.robot_id != robot.robot_id and (p.failed or p.state in {"CHARGING", "DOCKED_CHARGING"})}
+                        alt_path = a_star(robot.position, robot.current_goal, self.warehouse, blocked=hard_blocked)
                         if len(alt_path) > 1:
+                            self.reservation_table.release(robot.robot_id)
                             robot.current_path = alt_path
                             robot.state = "REROUTING"
                             robot.waiting_time = 0
+                            robot.replanning_retries = 0
                             self.metrics.replanning_events += 1
                             self.metrics.record_event({"type": "route_replanned", "robot": robot.robot_id, "time": self.time_step})
                             return False
-                        elif robot.replanning_retries >= robot.max_replanning_retries:
-                            robot.state = "NO_FEASIBLE_ROUTE"
-                            self.incident_manager.raise_incident(
-                                incident_type="NO_FEASIBLE_ROUTE",
-                                severity=IncidentSeverity.MEDIUM,
-                                timestamp=self.time_step,
-                                affected_entities={"robots": [robot.robot_id]},
-                                detected_by="PathPlanner",
-                                decision=f"Robot {robot.robot_id} exhausted {robot.max_replanning_retries} replan retries",
-                            )
-                            return False
+
                         all_pos = set(positions.values()) | {robot.position}
                         for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
                             cand = (robot.position[0] + dx, robot.position[1] + dy)
@@ -798,6 +808,7 @@ class BaseFleetSimulator:
                                 robot.state = "REROUTING"
                                 robot.current_path = []
                                 robot.waiting_time = 0
+                                robot.replanning_retries = 0
                                 self.metrics.replanning_events += 1
                                 self._plan_path_for_robot(robot, extra_blocked={target_cell})
                                 return False
@@ -815,12 +826,18 @@ class BaseFleetSimulator:
             if reserved_by and reserved_by != robot.robot_id:
                 self.wait_for_graph.add_wait(robot.robot_id, reserved_by)
             self.metrics.record_event({"type": "reservation_conflict", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
+            if robot.waiting_time >= 3:
+                self.reservation_table.release(robot.robot_id)
+                self._plan_path_for_robot(robot, extra_blocked={target_cell})
             return False
         if not self.reservation_table.reserve_edge(robot.robot_id, robot.position, target_cell, self.time_step):
             self.metrics.prevented_conflicts += 1
             robot.state = "TEMPORARILY_BLOCKED"
             robot.waiting_time += 1
             robot.blocked_count += 1
+            if robot.waiting_time >= 3:
+                self.reservation_table.release(robot.robot_id)
+                self._plan_path_for_robot(robot, extra_blocked={target_cell})
             return False
         prior = robot.position
         robot.position = target_cell
@@ -834,7 +851,16 @@ class BaseFleetSimulator:
         robot.battery = max(0.0, robot.battery - 0.25)
         self.metrics.total_distance += 1
         self.metrics.record_event({"type": "move", "robot": robot.robot_id, "from": prior, "to": target_cell, "time": self.time_step})
-        robot.state = "MOVING"
+        if robot.carrying_package_id:
+            robot.state = "MOVING_TO_DROPOFF"
+        elif robot.current_task:
+            robot.state = "MOVING_TO_PICKUP"
+        elif robot.assigned_dock:
+            robot.state = "RETURNING_TO_CHARGE"
+        elif robot.returning_home:
+            robot.state = "RETURNING_HOME"
+        else:
+            robot.state = "MOVING"
         robot.waiting_time = 0
         robot.blocked_count = 0
         robot.replanning_retries = 0
@@ -867,6 +893,8 @@ class BaseFleetSimulator:
                 self.metrics.record_event({"type": "task_assigned", "task": task.task_id, "robot": robot_id, "reason": task.allocation_reason, "time": self.time_step})
 
     def _send_to_charge(self, robot: AMRRobot) -> None:
+        self.reservation_table.release(robot.robot_id)
+
         if not self.warehouse.charging_stations:
             robot.state = "CHARGING"
             return
@@ -1064,6 +1092,7 @@ class BaseFleetSimulator:
                         del self.charging_reservations[dock]
                     robot.state = "IDLE"
                     robot.assigned_dock = None
+                    self.reservation_table.release(robot.robot_id)
                     self.metrics.record_event({"type": "robot_charge_complete", "event": "CHARGING_COMPLETED", "robot": robot.robot_id, "battery": round(robot.battery, 1), "time": self.time_step})
 
                     if self.charging_queue:
@@ -1074,16 +1103,39 @@ class BaseFleetSimulator:
                     has_next = self._activate_next_assigned_task(robot)
                     if not has_next and self.task_execution_active:
                         self._assign_unassigned_tasks()
+
+                    # Leave charging station: if no active task and still on dock, vacate the dock physically
+                    if robot.current_task is None and robot.position in self.warehouse.charging_stations:
+                        vacate_cell = None
+                        all_positions = {r.position for r in self.robots.values()}
+                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            cand = (robot.position[0] + dx, robot.position[1] + dy)
+                            if self.warehouse.is_walkable(cand) and cand not in self.warehouse.charging_stations and cand not in all_positions:
+                                vacate_cell = cand
+                                break
+                        if vacate_cell:
+                            self._move_robot(robot, vacate_cell)
+                        elif robot.home_position and robot.position != robot.home_position:
+                            robot.returning_home = True
+                            robot.state = "RETURNING_HOME"
+                            robot.current_goal = robot.home_position
+                            self._plan_path_for_robot(robot)
                 continue
 
             if robot.state in {"RETURNING_TO_CHARGE"} or (robot.assigned_dock is not None and robot.current_task is None and robot.state != "CHARGING"):
                 if robot.assigned_dock and robot.position == robot.assigned_dock:
                     robot.state = "CHARGING"
                     robot.current_path = []
+                    self.reservation_table.release(robot.robot_id)
                     self.metrics.record_event({"type": "robot_docked", "event": "CHARGING_STARTED", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
                     continue
                 if not robot.assigned_dock:
-                    # In charging queue waiting for an available dock
+                    occupied_docks = {r.assigned_dock for r in self.robots.values() if r.robot_id != robot.robot_id and r.assigned_dock}
+                    occupied_docks.update(r.position for r in self.robots.values() if r.robot_id != robot.robot_id and r.position in self.warehouse.charging_stations and (r.state in {"CHARGING", "DOCKED_CHARGING"} or r.assigned_dock == r.position))
+                    occupied_docks.update(dock for dock, res_rid in self.charging_reservations.items() if res_rid != robot.robot_id)
+                    free_docks = [dock for dock in self.warehouse.charging_stations if dock not in occupied_docks and self.warehouse.is_walkable(dock)]
+                    if free_docks:
+                        self._send_to_charge(robot)
                     continue
                 if not robot.current_path or robot.position == robot.current_path[-1]:
                     self._plan_path_for_robot(robot)
@@ -1094,9 +1146,13 @@ class BaseFleetSimulator:
                         if robot.position == robot.assigned_dock:
                             robot.state = "CHARGING"
                             robot.current_path = []
-                            self.metrics.record_event({"type": "robot_docked", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
+                            self.reservation_table.release(robot.robot_id)
+                            self.metrics.record_event({"type": "robot_docked", "event": "CHARGING_STARTED", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
                         else:
                             robot.state = "RETURNING_TO_CHARGE"
+                    else:
+                        if robot.waiting_time >= 2:
+                            self._plan_path_for_robot(robot, extra_blocked={next_cell})
                 continue
 
             if robot.state not in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} and robot.robot_id not in self.charging_queue and (((robot.battery < self.config.low_battery_threshold and robot.carrying_package_id is None) or robot.battery <= 0.0)):
@@ -1226,15 +1282,22 @@ class BaseFleetSimulator:
                     elif robot.waiting_time >= 4:
                         robot.replanning_retries += 1
                         if robot.replanning_retries >= robot.max_replanning_retries:
-                            robot.state = "NO_FEASIBLE_ROUTE"
-                            self.incident_manager.raise_incident(
-                                incident_type="NO_FEASIBLE_ROUTE",
-                                severity=IncidentSeverity.MEDIUM,
-                                timestamp=self.time_step,
-                                affected_entities={"robots": [robot.robot_id]},
-                                detected_by="PathPlanner",
-                                decision=f"Robot {robot.robot_id} exceeded replanning retry limit ({robot.max_replanning_retries})",
-                            )
+                            static_path = a_star(robot.position, robot.current_goal, self.warehouse, set()) if robot.current_goal else []
+                            if len(static_path) > 1:
+                                robot.state = "TEMPORARILY_BLOCKED"
+                                robot.replanning_retries = 0
+                                robot.waiting_time = 0
+                                self._plan_path_for_robot(robot, extra_blocked={next_cell})
+                            else:
+                                robot.state = "NO_FEASIBLE_ROUTE"
+                                self.incident_manager.raise_incident(
+                                    incident_type="NO_FEASIBLE_ROUTE",
+                                    severity=IncidentSeverity.MEDIUM,
+                                    timestamp=self.time_step,
+                                    affected_entities={"robots": [robot.robot_id]},
+                                    detected_by="PathPlanner",
+                                    decision=f"Robot {robot.robot_id} exceeded replanning retry limit ({robot.max_replanning_retries})",
+                                )
                         else:
                             robot.state = "REROUTING"
                             robot.current_path = []
@@ -1256,15 +1319,22 @@ class BaseFleetSimulator:
                     if robot.waiting_time >= 4:
                         robot.replanning_retries += 1
                         if robot.replanning_retries >= robot.max_replanning_retries:
-                            robot.state = "NO_FEASIBLE_ROUTE"
-                            self.incident_manager.raise_incident(
-                                incident_type="NO_FEASIBLE_ROUTE",
-                                severity=IncidentSeverity.MEDIUM,
-                                timestamp=self.time_step,
-                                affected_entities={"robots": [robot.robot_id]},
-                                detected_by="PathPlanner",
-                                decision=f"Robot {robot.robot_id} exceeded replanning retry limit ({robot.max_replanning_retries})",
-                            )
+                            static_path = a_star(robot.position, robot.current_goal, self.warehouse, set()) if robot.current_goal else []
+                            if len(static_path) > 1:
+                                robot.state = "TEMPORARILY_BLOCKED"
+                                robot.replanning_retries = 0
+                                robot.waiting_time = 0
+                                self._plan_path_for_robot(robot)
+                            else:
+                                robot.state = "NO_FEASIBLE_ROUTE"
+                                self.incident_manager.raise_incident(
+                                    incident_type="NO_FEASIBLE_ROUTE",
+                                    severity=IncidentSeverity.MEDIUM,
+                                    timestamp=self.time_step,
+                                    affected_entities={"robots": [robot.robot_id]},
+                                    detected_by="PathPlanner",
+                                    decision=f"Robot {robot.robot_id} exceeded replanning retry limit ({robot.max_replanning_retries})",
+                                )
                         else:
                             robot.state = "REROUTING"
                             robot.current_path = []
@@ -1274,7 +1344,7 @@ class BaseFleetSimulator:
                             self.metrics.record_event({"type": "deadlock_detected", "robot": robot.robot_id, "time": self.time_step})
                             self.metrics.record_event({"type": "deadlock_resolved", "robot": robot.robot_id, "method": "local_reroute", "time": self.time_step})
                             self._plan_path_for_robot(robot)
-                    break
+                        break
 
         # Graph-theoretic Wait-For Graph (WFG) cycle detection & breaking
         self._detect_and_resolve_wfg_deadlocks()
@@ -1548,6 +1618,13 @@ class BaseFleetSimulator:
             "duration": duration,
             "time": self.time_step,
         })
+        self.reservation_table.release(robot.robot_id)
+
+        # Check if robot needs charging before taking on more work
+        if robot.battery < self.config.low_battery_threshold:
+            if self.warehouse.charging_stations:
+                self._send_to_charge(robot)
+                return
 
         # Check if there is another assigned task in this robot's queue first
         has_next = self._activate_next_assigned_task(robot)
@@ -1605,6 +1682,7 @@ class BaseFleetSimulator:
             return
 
         if not robot.home_position or robot.position == robot.home_position:
+            self.reservation_table.release(robot.robot_id)
             robot.returning_home = False
             robot.current_goal = None
             robot.current_path = []
@@ -1633,6 +1711,7 @@ class BaseFleetSimulator:
                 self.metrics.messages_sent += 1
                 robot.current_path = robot.current_path[1:]
                 if robot.position == robot.home_position:
+                    self.reservation_table.release(robot.robot_id)
                     robot.returning_home = False
                     robot.current_goal = None
                     robot.current_path = []
@@ -1679,7 +1758,8 @@ class BaseFleetSimulator:
                     peers[peer.robot_id] = intent
                     self.metrics.messages_sent += 1
                     self.metrics.messages_received += 1
-                    self.metrics.record_event({"type": "peer_message", "sender": robot.robot_id, "receiver": peer.robot_id, "time": self.time_step})
+                    if len(self.metrics.events) < 5000:
+                        self.metrics.record_event({"type": "peer_message", "sender": robot.robot_id, "receiver": peer.robot_id, "time": self.time_step})
             robot.recent_messages = [{"kind": item.kind, "sender": item.sender, "payload": item.payload} for item in self.network.get_recent_messages(4)]
 
     def _manual_step(self, robot: AMRRobot) -> None:
