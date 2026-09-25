@@ -216,11 +216,9 @@ class LiveDashboard:
                 self.simulator.set_robot_speed(robot_id, speed)
             elif action == "set_global_speed":
                 speed_val = max(0.2, min(float(message.get("speed", message.get("value", 1.0))), 5.0))
-                for r in self.simulator.robots.values():
-                    r.speed_multiplier = speed_val
+                self.simulator.set_global_speed(speed_val)
                 multiplier = max(0.05, min(speed_val, 10.0))
                 self.speed = 0.22 / multiplier
-                self.simulator.metrics.record_event({"type": "global_speed_updated", "speed": speed_val, "time": self.simulator.time_step})
             elif action == "configure_fleet":
                 raw_r = message.get("robot_count", message.get("count", 5))
                 raw_t = message.get("task_count", message.get("tasks", 10))

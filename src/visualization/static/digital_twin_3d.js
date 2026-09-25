@@ -549,6 +549,9 @@ class DigitalTwin3D {
       let mesh = this.robotMeshes.get(r.robot_id);
       if (!mesh) {
         mesh = this.createAMRMesh(r);
+        const initPos = this.cellToWorld(r.position[0], r.position[1]);
+        mesh.position.copy(initPos);
+        mesh.userData.targetPosition = initPos;
         this.robotMeshes.set(r.robot_id, mesh);
         this.scene.add(mesh);
       }

@@ -47,7 +47,8 @@ class SimulationConfig:
     map_name: str = "default"
     continuous_dispatch: bool = False
     low_battery_threshold: float = 35.0
-    charge_recovery_threshold: float = 85.0
+    charge_recovery_threshold: float = 100.0
+    charging_duration: int = 5
 
     def __post_init__(self) -> None:
         if self.robot_count < 0 or self.robot_count > 20:
@@ -133,6 +134,21 @@ class BaseFleetSimulator:
         self.robots[robot.robot_id] = robot
 
     def add_task(self, task: Task) -> None:
+        # Ensure endpoints never land inside racks or obstacles
+        for attr in ("pickup", "destination"):
+            pt = getattr(task, attr)
+            if not self.warehouse.is_walkable(pt) or any(pt in r.occupied_cells() for r in self.warehouse.racks.values()):
+                best_cell = pt
+                best_dist = float("inf")
+                for y in range(1, self.warehouse.height - 1):
+                    for x in range(1, self.warehouse.width - 1):
+                        cand = (x, y)
+                        if self.warehouse.is_walkable(cand) and not any(cand in r.occupied_cells() for r in self.warehouse.racks.values()):
+                            d = abs(cand[0] - pt[0]) + abs(cand[1] - pt[1])
+                            if d < best_dist:
+                                best_dist = d
+                                best_cell = cand
+                setattr(task, attr, best_cell)
         self.tasks[task.task_id] = task
         if task.package_id is None:
             task.package_id = f"PKG-{task.task_id}"
@@ -236,7 +252,7 @@ class BaseFleetSimulator:
             return
         pickups, destinations = self._generate_candidate_cells()
         for i in range(self.config.task_count):
-            pickup = pickups[i % len(pickups)]
+            pickup = pickups[(i * 7 + 3) % len(pickups)]
             destination = destinations[(i * 3 + 1) % len(destinations)]
             if pickup == destination:
                 destination = destinations[(i * 3 + 2) % len(destinations)]
@@ -512,7 +528,12 @@ class BaseFleetSimulator:
     def _plan_path_for_robot(self, robot: AMRRobot, extra_blocked: set[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
         if robot.current_task and robot.current_task in self.tasks:
             task = self.tasks[robot.current_task]
-            target = task.pickup if robot.position != task.pickup else task.destination
+            if robot.carrying_package_id is not None or robot.state == "MOVING_TO_DROPOFF" or task.status == "moving_to_dropoff":
+                target = task.destination
+            elif robot.position == task.pickup:
+                target = task.destination
+            else:
+                target = task.pickup
         elif (robot.state in {"RETURNING_TO_CHARGE", "CHARGING", "DOCKED_CHARGING"} or robot.assigned_dock is not None) and robot.assigned_dock:
             target = robot.assigned_dock
         elif robot.returning_home and robot.home_position:
@@ -543,6 +564,8 @@ class BaseFleetSimulator:
             path = a_star(robot.position, target, self.warehouse, hard_blocked)
         if len(path) <= 1:
             path = a_star(robot.position, target, self.warehouse, extra_blocked)
+        if any(not self.warehouse.is_walkable(c) or any(c in rk.occupied_cells() for rk in self.warehouse.racks.values()) for c in path):
+            path = [robot.position]
         robot.current_path = path
         robot.current_waypoint = 0
         if len(path) <= 1 and robot.position != target:
@@ -750,7 +773,10 @@ class BaseFleetSimulator:
         return selected
 
     def _move_robot(self, robot: AMRRobot, target_cell: tuple[int, int]) -> bool:
-        if not self.warehouse.is_walkable(target_cell):
+        # Movement safety check: warehouse bounds, walkability, hard rack check, and orthogonal adjacency
+        if not (0 <= target_cell[0] < self.warehouse.width and 0 <= target_cell[1] < self.warehouse.height):
+            return False
+        if not self.warehouse.is_walkable(target_cell) or any(target_cell in rk.occupied_cells() for rk in self.warehouse.racks.values()):
             self.metrics.prevented_conflicts += 1
             robot.state = "TEMPORARILY_BLOCKED"
             robot.obstacle_status = "BLOCKED"
@@ -758,6 +784,12 @@ class BaseFleetSimulator:
             robot.blocked_count += 1
             self.metrics.record_event({"type": "obstacle_detected", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             return False
+        # Strictly orthogonal single step: dx + dy == 1 (no diagonal cuts, no jumps)
+        dx = abs(target_cell[0] - robot.position[0])
+        dy = abs(target_cell[1] - robot.position[1])
+        if (dx + dy) != 1:
+            return False
+
         positions = {rid: r.position for rid, r in self.robots.items() if rid != robot.robot_id}
         if ConflictDetector.detect_vertex_conflict({robot.robot_id: target_cell, **positions}):
             self.metrics.prevented_conflicts += 1
@@ -781,12 +813,17 @@ class BaseFleetSimulator:
                     winner, loser, reason = NegotiationProtocol.negotiate_conflict(robot.robot_id, peer.robot_id, bid_r, bid_p)
                     self.metrics.record_event({"type": "p2p_negotiation_resolved", "winner": winner, "loser": loser, "reason": reason, "time": self.time_step})
 
-                    peer_stationary = peer.failed or peer.state in {"CHARGING", "DOCKED_CHARGING", "SAFETY_STOP", "PAUSED"} or (peer.assigned_dock is not None and peer.assigned_dock == peer.position)
+                    peer_stationary = (
+                        peer.failed
+                        or peer.state in {"CHARGING", "DOCKED_CHARGING", "SAFETY_STOP", "PAUSED"}
+                        or (peer.assigned_dock is not None and peer.assigned_dock == peer.position)
+                        or (peer.state == "RETURNING_TO_CHARGE" and peer.assigned_dock is None)
+                    )
                     is_head_on = bool(peer.current_path and len(peer.current_path) > 1 and peer.current_path[1] == robot.position) or self.wait_for_graph.detect_head_on(robot.robot_id, peer.robot_id)
 
                     # If peer is stationary, head-on, or waiting persisted: replan an alternate path
-                    if (peer_stationary or is_head_on or robot.waiting_time >= 2) and (loser == robot.robot_id or peer_stationary or is_head_on):
-                        hard_blocked = {target_cell} | {p.position for p in self.robots.values() if p.robot_id != robot.robot_id and (p.failed or p.state in {"CHARGING", "DOCKED_CHARGING"})}
+                    if (peer_stationary or is_head_on or robot.waiting_time >= 2) and (loser == robot.robot_id or peer_stationary):
+                        hard_blocked = {target_cell} | {p.position for p in self.robots.values() if p.robot_id != robot.robot_id}
                         alt_path = a_star(robot.position, robot.current_goal, self.warehouse, blocked=hard_blocked)
                         if len(alt_path) > 1:
                             self.reservation_table.release(robot.robot_id)
@@ -796,22 +833,10 @@ class BaseFleetSimulator:
                             robot.replanning_retries = 0
                             self.metrics.replanning_events += 1
                             self.metrics.record_event({"type": "route_replanned", "robot": robot.robot_id, "time": self.time_step})
+                        else:
+                            self.reservation_table.release(robot.robot_id)
+                            self._plan_path_for_robot(robot, extra_blocked={target_cell})
                             return False
-
-                        all_pos = set(positions.values()) | {robot.position}
-                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                            cand = (robot.position[0] + dx, robot.position[1] + dy)
-                            if self.warehouse.is_walkable(cand) and cand not in all_pos and cand != target_cell:
-                                self.reservation_table.release(robot.robot_id)
-                                self.reservation_table.reserve(robot.robot_id, cand, self.time_step)
-                                robot.position = cand
-                                robot.state = "REROUTING"
-                                robot.current_path = []
-                                robot.waiting_time = 0
-                                robot.replanning_retries = 0
-                                self.metrics.replanning_events += 1
-                                self._plan_path_for_robot(robot, extra_blocked={target_cell})
-                                return False
             self.metrics.record_event({"type": "conflict_detected", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             self.metrics.record_event({"type": "collision_prevented", "robot": robot.robot_id, "cell": target_cell, "time": self.time_step})
             if robot.state != "NO_FEASIBLE_ROUTE":
@@ -995,7 +1020,7 @@ class BaseFleetSimulator:
         start_idx = len(self.tasks)
         for i in range(count):
             idx = start_idx + i
-            pickup = next((cell for cell in pickup_candidates[idx % len(pickup_candidates):] + pickup_candidates[:idx % len(pickup_candidates)] if self.warehouse.is_walkable(cell)), (2, 2))
+            pickup = next((cell for cell in pickup_candidates[idx % len(pickup_candidates):] + pickup_candidates[:idx % len(pickup_candidates)] if self.warehouse.is_walkable(cell)), (2, 3))
             destination = next((cell for cell in destination_candidates[idx % len(destination_candidates):] + destination_candidates[:idx % len(destination_candidates)] if self.warehouse.is_walkable(cell)), (self.warehouse.width - 4, self.warehouse.height - 4))
             task_id = f"T{idx}"
             pkg_id = f"PKG-{idx + 1:03d}"
@@ -1084,9 +1109,17 @@ class BaseFleetSimulator:
                 robot.state = "FAILED"
                 continue
             if robot.state in {"CHARGING", "DOCKED_CHARGING"}:
-                robot.battery = min(robot.max_battery, robot.battery + 4.0)
-                if robot.battery >= self.config.charge_recovery_threshold:
-                    robot.battery = min(robot.max_battery, robot.battery)
+                robot.docked_charging_ticks += 1
+                charge_rate = max(4.0, (robot.max_battery - robot.battery) / max(1, self.config.charging_duration + 1 - robot.docked_charging_ticks))
+                robot.battery = min(robot.max_battery, robot.battery + charge_rate)
+                charging_complete = (robot.docked_charging_ticks >= self.config.charging_duration) or (
+                    self.config.charge_recovery_threshold < 100.0
+                    and robot.battery >= self.config.charge_recovery_threshold
+                    and robot.docked_charging_ticks >= 1
+                )
+                if charging_complete:
+                    robot.battery = robot.max_battery
+                    robot.docked_charging_ticks = 0
                     dock = robot.assigned_dock or (robot.position if robot.position in self.warehouse.charging_stations else None)
                     if dock and dock in self.charging_reservations:
                         del self.charging_reservations[dock]
@@ -1126,6 +1159,7 @@ class BaseFleetSimulator:
                 if robot.assigned_dock and robot.position == robot.assigned_dock:
                     robot.state = "CHARGING"
                     robot.current_path = []
+                    robot.docked_charging_ticks = 0
                     self.reservation_table.release(robot.robot_id)
                     self.metrics.record_event({"type": "robot_docked", "event": "CHARGING_STARTED", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
                     continue
@@ -1146,6 +1180,7 @@ class BaseFleetSimulator:
                         if robot.position == robot.assigned_dock:
                             robot.state = "CHARGING"
                             robot.current_path = []
+                            robot.docked_charging_ticks = 0
                             self.reservation_table.release(robot.robot_id)
                             self.metrics.record_event({"type": "robot_docked", "event": "CHARGING_STARTED", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
                         else:
@@ -1450,16 +1485,23 @@ class BaseFleetSimulator:
                     break
 
             if evac_cell:
-                self.reservation_table.release(conceding_robot.robot_id)
-                self.reservation_table.reserve(conceding_robot.robot_id, evac_cell, self.time_step)
-                conceding_robot.position = evac_cell
-                conceding_robot.state = "REROUTING"
-                conceding_robot.current_path = []
-                conceding_robot.waiting_time = 0
-                conceding_robot.blocked_count = 0
-                blocked = {other_robot.position} if other_robot else None
-                self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
-                outcome_desc = f"{conceding_robot.robot_id} evacuated corridor into buffer cell {evac_cell}"
+                if self._move_robot(conceding_robot, evac_cell):
+                    conceding_robot.state = "REROUTING"
+                    conceding_robot.current_path = []
+                    conceding_robot.waiting_time = 0
+                    conceding_robot.blocked_count = 0
+                    blocked = {other_robot.position} if other_robot else None
+                    self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
+                    outcome_desc = f"{conceding_robot.robot_id} moved into buffer cell {evac_cell}"
+                else:
+                    conceding_robot.replanning_retries += 1
+                    blocked = {other_robot.position} if other_robot else None
+                    conceding_robot.state = "REROUTING"
+                    conceding_robot.current_path = []
+                    conceding_robot.waiting_time = 0
+                    conceding_robot.blocked_count = 0
+                    self._plan_path_for_robot(conceding_robot, extra_blocked=blocked)
+                    outcome_desc = f"{conceding_robot.robot_id} rerouted path avoiding conflict zone"
             else:
                 conceding_robot.replanning_retries += 1
                 blocked = {other_robot.position} if other_robot else None
@@ -2115,6 +2157,22 @@ class BaseFleetSimulator:
             "time": self.time_step,
         })
         return True, f"{robot_id} speed updated to {robot.speed_multiplier:.1f}x"
+
+    def set_global_speed(self, speed: float, reason: str = "Operator global speed adjustment") -> tuple[bool, str]:
+        if speed < 0.1 or speed > 5.0:
+            return False, f"Speed {speed}x outside permitted range [0.1x, 5.0x]"
+        prev_speed = self.global_speed_multiplier
+        self.global_speed_multiplier = round(float(speed), 2)
+        for robot in self.robots.values():
+            robot.speed_multiplier = self.global_speed_multiplier
+            robot.velocity = robot.speed_multiplier
+        self.metrics.record_event({
+            "type": "global_speed_updated",
+            "previous_speed": prev_speed,
+            "speed": self.global_speed_multiplier,
+            "time": self.time_step,
+        })
+        return True, f"Global fleet speed updated to {self.global_speed_multiplier:.1f}x"
 
     def set_task_allocation(self, mode: str, targets: dict[str, int], reason: str = "Operator workload policy update") -> tuple[bool, str]:
         prev_mode = self.allocation_policy.mode.value

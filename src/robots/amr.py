@@ -41,6 +41,7 @@ class AMRRobot:
     stuck_ticks: int = 0
     idle_ticks: int = 0
     charging_ticks: int = 0
+    docked_charging_ticks: int = 0
     speed_multiplier: float = 1.0
     movement_accumulator: float = 0.0
     target_tasks: int = 0

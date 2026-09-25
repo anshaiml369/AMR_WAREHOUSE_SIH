@@ -85,8 +85,15 @@ class Warehouse:
             self._set_cell(cell, 2)
 
     @property
+    def rack_cells(self) -> set[tuple[int, int]]:
+        cells: set[tuple[int, int]] = set()
+        for rack in self.racks.values():
+            cells.update(rack.occupied_cells())
+        return cells
+
+    @property
     def obstacles(self) -> set[tuple[int, int]]:
-        return self.static_obstacles | self.dynamic_obstacles
+        return self.static_obstacles | self.dynamic_obstacles | self.rack_cells
 
     @property
     def total_storage_capacity(self) -> int:
@@ -128,6 +135,9 @@ class Warehouse:
             return False
         if cell in self.static_obstacles or cell in self.dynamic_obstacles:
             return False
+        for rack in self.racks.values():
+            if cell in rack.occupied_cells():
+                return False
         return True
 
     def validate_rack_placement(
