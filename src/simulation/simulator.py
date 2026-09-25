@@ -984,6 +984,11 @@ class BaseFleetSimulator:
 
         self.time_step += 1
         self.simulation_status = "RUNNING"
+        if not self.task_execution_active and any(t.status != "completed" for t in self.tasks.values()):
+            self.task_execution_active = True
+            if self.task_execution_state in {"QUEUED", "READY"}:
+                self.task_execution_state = "EXECUTING"
+
         self.wait_for_graph = WaitForGraph()
 
         # Reassign stalled tasks (stuck in congestion before pickup)

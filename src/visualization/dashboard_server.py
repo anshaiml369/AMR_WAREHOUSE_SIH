@@ -63,6 +63,9 @@ class LiveDashboard:
             elif action in {"start", "resume"}:
                 self.running = True
                 self.simulator.simulation_status = "RUNNING"
+                self.simulator.task_execution_active = True
+                if self.simulator.task_execution_state in {"QUEUED", "READY"}:
+                    self.simulator.task_execution_state = "EXECUTING"
                 if self.simulator.demo_mode:
                     self.simulator.demo_paused = False
                 self.simulator.metrics.record_event({"type": "simulation_resumed", "time": self.simulator.time_step})
