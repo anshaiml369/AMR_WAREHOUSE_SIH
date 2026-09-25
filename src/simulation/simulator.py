@@ -488,13 +488,14 @@ class BaseFleetSimulator:
             if not has_next and self.task_execution_active:
                 self._assign_unassigned_tasks()
             rem_assigned = [t for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed"]
-            if robot.current_task is None and len(rem_assigned) == 0 and robot.home_position and robot.position != robot.home_position:
+            has_pending_global = any(t.status in {"pending", "queued"} for t in self.tasks.values())
+            if robot.current_task is None and len(rem_assigned) == 0 and not has_pending_global and robot.home_position and robot.position != robot.home_position:
                 robot.returning_home = True
                 robot.state = "RETURNING_HOME"
                 robot.current_goal = robot.home_position
                 robot.current_path = self._plan_path_for_robot(robot)
             else:
-                if robot.current_task is not None or len(rem_assigned) > 0:
+                if robot.current_task is not None or len(rem_assigned) > 0 or has_pending_global:
                     robot.returning_home = False
                 elif robot.position == robot.home_position:
                     robot.returning_home = False
@@ -510,6 +511,8 @@ class BaseFleetSimulator:
         if robot.current_task and robot.current_task in self.tasks:
             task = self.tasks[robot.current_task]
             target = task.pickup if robot.position != task.pickup else task.destination
+        elif (robot.state in {"RETURNING_TO_CHARGE", "CHARGING", "DOCKED_CHARGING"} or robot.assigned_dock is not None) and robot.assigned_dock:
+            target = robot.assigned_dock
         elif robot.returning_home and robot.home_position:
             target = robot.home_position
         elif robot.assigned_dock:
@@ -884,6 +887,8 @@ class BaseFleetSimulator:
             robot.current_goal = None
             robot.current_path = []
 
+        robot.returning_home = False
+
         if free_docks:
             target_dock = min(free_docks, key=lambda d: self._distance_to_robot(robot.position, d))
             self.charging_reservations[target_dock] = robot.robot_id
@@ -896,15 +901,14 @@ class BaseFleetSimulator:
             self._plan_path_for_robot(robot)
             self.metrics.record_event({"type": "dispatched_to_dock", "event": "CHARGING_REQUESTED", "robot": robot.robot_id, "dock": list(target_dock), "time": self.time_step})
         else:
-            target_dock = min(list(self.warehouse.charging_stations), key=lambda d: self._distance_to_robot(robot.position, d))
             if robot.robot_id not in self.charging_queue:
                 self.charging_queue.append(robot.robot_id)
             self.charging_queue.sort(key=lambda rid: (self.robots[rid].battery, -self.robots[rid].assigned_tasks_count) if rid in self.robots else (100.0, 0))
             rank = self.charging_queue.index(robot.robot_id) + 1
-            robot.assigned_dock = target_dock
+            robot.assigned_dock = None
             robot.state = "RETURNING_TO_CHARGE"
-            robot.current_goal = target_dock
-            self._plan_path_for_robot(robot)
+            robot.current_goal = None
+            robot.current_path = []
             self.metrics.record_event({
                 "type": "charging_queued",
                 "event": "CHARGING_REQUESTED",
@@ -1031,6 +1035,16 @@ class BaseFleetSimulator:
             self.returning_robot_id = non_home[0] if non_home else None
             self.task_execution_state = "COMPLETED"
             self.simulation_status = "COMPLETED"
+            for robot in self.robots.values():
+                if robot.assigned_dock is None and robot.state not in {"CHARGING", "DOCKED_CHARGING"}:
+                    if robot.robot_id in self.charging_queue:
+                        self.charging_queue.remove(robot.robot_id)
+                    robot.state = "IDLE"
+                    if robot.home_position and robot.position != robot.home_position:
+                        robot.returning_home = True
+                        robot.state = "RETURNING_HOME"
+                        robot.current_goal = robot.home_position
+                        robot.current_path = self._plan_path_for_robot(robot)
 
         for robot in self.robots.values():
             if robot.failed:
@@ -1057,11 +1071,14 @@ class BaseFleetSimulator:
                         self._assign_unassigned_tasks()
                 continue
 
-            if robot.state == "RETURNING_TO_CHARGE":
+            if robot.state in {"RETURNING_TO_CHARGE"} or (robot.assigned_dock is not None and robot.current_task is None and robot.state != "CHARGING"):
                 if robot.assigned_dock and robot.position == robot.assigned_dock:
                     robot.state = "CHARGING"
                     robot.current_path = []
                     self.metrics.record_event({"type": "robot_docked", "event": "CHARGING_STARTED", "robot": robot.robot_id, "dock": list(robot.assigned_dock), "time": self.time_step})
+                    continue
+                if not robot.assigned_dock:
+                    # In charging queue waiting for an available dock
                     continue
                 if not robot.current_path or robot.position == robot.current_path[-1]:
                     self._plan_path_for_robot(robot)
@@ -1096,6 +1113,18 @@ class BaseFleetSimulator:
                     if len(rem_assigned) > 0:
                         robot.returning_home = False
                         continue
+
+                    has_pending_global = any(t.status in {"pending", "queued"} for t in self.tasks.values())
+                    if has_pending_global:
+                        # If robot battery is too low to accept pending work, opportunity-charge
+                        if robot.battery < 45.0 and robot.state not in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"} and robot.robot_id not in self.charging_queue and robot.assigned_dock is None:
+                            self._send_to_charge(robot)
+                            continue
+                        robot.returning_home = False
+                        if robot.state not in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"}:
+                            robot.state = "IDLE"
+                        continue
+
                     if robot.home_position and robot.position != robot.home_position:
                         next_c = robot.current_path[1] if robot.current_path and len(robot.current_path) > 1 else None
                         z_state, s_factor, s_reason = self.safety_supervisor.evaluate_robot_safety(robot.position, next_c)
@@ -1244,6 +1273,7 @@ class BaseFleetSimulator:
 
         # Graph-theoretic Wait-For Graph (WFG) cycle detection & breaking
         self._detect_and_resolve_wfg_deadlocks()
+        self.reservation_table.prune_expired(self.time_step)
 
         # DEDICAT6G Hardware Telemetry Dynamic Profiler
         for robot in self.robots.values():
@@ -1521,9 +1551,10 @@ class BaseFleetSimulator:
         if not has_next and self.task_execution_active:
             self._assign_unassigned_tasks()
 
-        # Only return home if ALL assigned tasks for this robot are complete and no active task
+        # Only return home if ALL assigned tasks for this robot are complete, no active task, and no pending global tasks
         remaining_assigned = [t for t in self.tasks.values() if t.assigned_robot == robot.robot_id and t.status != "completed"]
-        if robot.current_task is None and len(remaining_assigned) == 0:
+        has_pending_global = any(t.status in {"pending", "queued"} for t in self.tasks.values())
+        if robot.current_task is None and len(remaining_assigned) == 0 and not has_pending_global:
             if robot.home_position and robot.position != robot.home_position:
                 robot.returning_home = True
                 robot.state = "RETURNING_HOME"
@@ -1536,10 +1567,29 @@ class BaseFleetSimulator:
                     robot.assigned_dock = robot.home_position
                 else:
                     robot.state = "IDLE"
-        elif robot.current_task is not None or len(remaining_assigned) > 0:
+        elif robot.current_task is not None or len(remaining_assigned) > 0 or has_pending_global:
             robot.returning_home = False
 
+        if not has_pending_global:
+            for r in self.robots.values():
+                rem_r = [t for t in self.tasks.values() if t.assigned_robot == r.robot_id and t.status != "completed"]
+                if r.current_task is None and len(rem_r) == 0:
+                    if r.assigned_dock is None and r.state not in {"CHARGING", "DOCKED_CHARGING"}:
+                        if r.robot_id in self.charging_queue:
+                            self.charging_queue.remove(r.robot_id)
+                        if r.home_position and r.position != r.home_position:
+                            r.returning_home = True
+                            r.state = "RETURNING_HOME"
+                            r.current_goal = r.home_position
+                            r.current_path = self._plan_path_for_robot(r)
+                        elif r.position == r.home_position:
+                            r.returning_home = False
+                            r.state = "IDLE"
+
     def _return_robot_home(self, robot: AMRRobot) -> None:
+        if robot.assigned_dock or robot.state in {"CHARGING", "DOCKED_CHARGING", "RETURNING_TO_CHARGE"}:
+            robot.returning_home = False
+            return
         if robot.current_task is not None:
             robot.returning_home = False
             return

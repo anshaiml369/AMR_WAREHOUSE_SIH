@@ -74,3 +74,17 @@ class ReservationTable:
     def clear_cell(self, cell: tuple[int, int]) -> None:
         if cell in self._vertex:
             del self._vertex[cell]
+
+    def prune_expired(self, current_time: int) -> None:
+        for cell, data in list(self._vertex.items()):
+            for t in list(data.keys()):
+                if t < current_time:
+                    del data[t]
+            if not data:
+                del self._vertex[cell]
+        for edge, data in list(self._edge.items()):
+            for t in list(data.keys()):
+                if t < current_time:
+                    del data[t]
+            if not data:
+                del self._edge[edge]
