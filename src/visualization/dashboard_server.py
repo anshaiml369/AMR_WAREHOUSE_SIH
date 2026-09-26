@@ -394,6 +394,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def end_headers(self):
+        super().end_headers()
+        self._headers_ended = True
+
+    def do_HEAD(self):
+        real_write = self.wfile.write
+        self._headers_ended = False
+        def guarded_write(data):
+            if not getattr(self, "_headers_ended", False):
+                return real_write(data)
+            return len(data)
+        self.wfile.write = guarded_write
+        try:
+            self.do_GET()
+        finally:
+            self.wfile.write = real_write
+
     def do_GET(self):
         clean_path = urlsplit(self.path).path
         if clean_path.startswith("/static/"):
@@ -831,6 +848,8 @@ async def websocket_handler(websocket):
 
 
 async def websocket_loop(host: str = "127.0.0.1", port: int = 8765):
+    import logging
+    logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
     for candidate in range(port, port + 10):
         try:
             async with websockets.serve(websocket_handler, host, candidate):
@@ -873,7 +892,7 @@ def start_dashboard(host: str | None = None, port: int | None = None):
             continue
     if server is None:
         raise RuntimeError(f"No free port found starting from {port}")
-    websocket_thread = threading.Thread(target=lambda: asyncio.run(websocket_loop(host)), daemon=True)
+    websocket_thread = threading.Thread(target=lambda: asyncio.run(websocket_loop("127.0.0.1")), daemon=True)
     websocket_thread.start()
     server.serve_forever()
 
