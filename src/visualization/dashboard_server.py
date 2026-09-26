@@ -856,7 +856,13 @@ async def websocket_loop(host: str = "127.0.0.1", port: int = 8765):
 
 
 
-def start_dashboard(host: str = "127.0.0.1", port: int = 8000):
+def start_dashboard(host: str | None = None, port: int | None = None):
+    import os
+    if host is None:
+        host = os.environ.get("HOST", "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+    if port is None:
+        port = int(os.environ.get("PORT", 8000))
+
     server = None
     for candidate in range(port, port + 20):
         try:
@@ -874,3 +880,4 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 8000):
 
 if __name__ == "__main__":
     start_dashboard()
+
